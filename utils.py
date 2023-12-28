@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import os
 import numpy as np
+import argparse
 
 # torch import
 import torch as th
@@ -17,6 +18,16 @@ from torch_geometric.data import HeteroData
 from torch_geometric.nn import HGTConv
 from torch_geometric.nn import Linear as gnn_Linear
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1', 'True'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0', 'False'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+    
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -71,14 +82,14 @@ class ConditionalResidualBlock1D(nn.Module):
             cond_dim,
             kernel_size=3,
             n_groups=8,
-            use_gnn=False,
+            use_gnn=True,
             gnn_data=None,
             gnn_hidden_channels=128,
             gnn_num_layers=4,
             gnn_num_heads=8,
             group='max',
             num_linear_layers=2,
-            linear_hidden_channels=2048
+            linear_hidden_channels=2048,
             ):
         super().__init__()
 
@@ -128,6 +139,9 @@ class ConditionalResidualBlock1D(nn.Module):
         # make sure dimensions compatible
         self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
             if in_channels != out_channels else nn.Identity()
+        
+        # make it float
+        self = self.float()
 
     def forward(self, x, cond=None, x_dict=None, edge_index_dict=None):
         '''
@@ -143,9 +157,11 @@ class ConditionalResidualBlock1D(nn.Module):
 
             for node_type, x_gnn in x_dict.items():
                 # if x_gnn is double then convert it to float
-                if type(x_gnn) is th.Tensor:
-                    if x_gnn.dtype == th.double:
-                        x_gnn = x_gnn.float()
+                # if type(x_gnn) is th.Tensor:
+                #     if x_gnn.dtype == th.double:
+                #         x_gnn = x_gnn.float()
+
+                # print out what device x_gnn is on
                 x_dict[node_type] = self.lin_dict[node_type](x_gnn).relu_()
 
             for conv in self.convs:
@@ -180,7 +196,8 @@ class ConditionalUnet1D(nn.Module):
         diffusion_step_embed_dim=256,
         down_dims=[256,512,1024],
         kernel_size=5,
-        n_groups=8
+        n_groups=8,
+        device='cuda'
         ):
         """
         input_dim: Dim of actions.
@@ -200,9 +217,9 @@ class ConditionalUnet1D(nn.Module):
         dsed = diffusion_step_embed_dim
         diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed),
-            nn.Linear(dsed, dsed * 4),
+            nn.Linear(dsed, dsed * 4, device=device),
             nn.Mish(),
-            nn.Linear(dsed * 4, dsed),
+            nn.Linear(dsed * 4, dsed, device=device),
         )
         cond_dim = dsed + global_cond_dim
 
@@ -257,6 +274,9 @@ class ConditionalUnet1D(nn.Module):
         #     sum(p.numel() for p in self.parameters()))
         # )
 
+        # make it float
+        self = self.float()
+
     def forward(self,
             sample: torch.Tensor,
             timestep: Union[torch.Tensor, float, int],
@@ -282,8 +302,8 @@ class ConditionalUnet1D(nn.Module):
         elif torch.is_tensor(timesteps) and len(timesteps.shape) == 0:
             timesteps = timesteps[None].to(sample.device)
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        
         timesteps = timesteps.expand(sample.shape[0])
-
         global_feature = self.diffusion_step_encoder(timesteps)
 
         if global_cond is not None:
@@ -294,6 +314,8 @@ class ConditionalUnet1D(nn.Module):
         x = sample
         h = []
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
+
+            # print out devices
             x = resnet(x, global_feature, x_dict, edge_index_dict)
             x = resnet2(x, global_feature, x_dict, edge_index_dict)
             h.append(x)
@@ -315,7 +337,7 @@ class ConditionalUnet1D(nn.Module):
         # (B,T,C)
         return x
 
-def create_pair_obs_act(dirs, device):
+def create_pair_obs_act(dirs, device, is_visualize=False):
 
     # loop over dirs
     obs_data = th.tensor([]).to(device)
@@ -327,7 +349,6 @@ def create_pair_obs_act(dirs, device):
         files = os.listdir(dir)
         files = [dir + '/' + file for file in files if file.endswith('.npz')]
 
-        cnt = 0
         for file in files:
             
             data = np.load(file) # load data
@@ -335,12 +356,8 @@ def create_pair_obs_act(dirs, device):
             acts = data['acts'] # actions
 
             # append to the data
-            obs_data = th.cat((obs_data, th.tensor(obs).to(device)), 0)
-            traj_data = th.cat((traj_data, th.tensor(acts).to(device)), 0)
-
-            cnt += 1
-            if cnt > 100:
-                break
+            obs_data = th.cat((obs_data, th.from_numpy(obs).float().to(device)), 0)
+            traj_data = th.cat((traj_data, th.from_numpy(acts).float().to(device)), 0)
 
     print("dataset before rearranging: ")
     print("obs_data.shape: ", obs_data.shape)
@@ -350,14 +367,17 @@ def create_pair_obs_act(dirs, device):
 
     dataset_obs = th.tensor([]).to(device)
     dataset_acts = th.tensor([]).to(device)
-    cnt = 0
+    idx = 0
     for i in range(obs_data.shape[0]): # loop over samples
         for j in range(traj_data.shape[1]): # loop over expert demonstrations (10)
             dataset_obs = th.cat((dataset_obs, obs_data[i, 0, :].unsqueeze(0).unsqueeze(0)), 0)
             dataset_acts = th.cat((dataset_acts, traj_data[i, j, :].unsqueeze(0).unsqueeze(0)), 0)
-            cnt += 1
-            if cnt > 100:
+            idx += 1
+            if idx >= 1000 and is_visualize:
                 break
+        if idx >= 1000 and is_visualize:
+            break
+
     dataset_obs = dataset_obs.squeeze(1)
     dataset_acts = dataset_acts.squeeze(1)
 
@@ -368,7 +388,7 @@ def create_pair_obs_act(dirs, device):
     return dataset_obs, dataset_acts
 
 
-def create_dataset(dirs, device):
+def create_dataset(dirs, device, is_visualize=False):
     
     """
     Create dataset from npz files in dirs
@@ -378,14 +398,14 @@ def create_dataset(dirs, device):
     """
     
     # get obs and acts
-    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device)
+    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, is_visualize)
 
     # create dataset
     dataset = TensorDataset(dataset_obs, dataset_acts)
 
     return dataset
 
-def create_gnn_dataset(dirs, device):
+def create_gnn_dataset(dirs, device, is_visualize=False):
 
     """
     This function generates a dataset for GNN
@@ -394,7 +414,7 @@ def create_gnn_dataset(dirs, device):
     " ********************* GET DATA ********************* "
 
     # get obs and acts
-    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device)
+    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, is_visualize)
 
     " ********************* INITIALIZE DATASET ********************* "
 
@@ -407,26 +427,12 @@ def create_gnn_dataset(dirs, device):
         " ********************* GET NODES ********************* "
 
         # nodes you need for GNN
-        # 0. current state
-        # 1. goal state
+        # dataset = [f_v, f_a, yaw_dot, f_g,  [f_ctrl_pts_o0], bbox_o0, [f_ctrl_pts_o1], bbox_o1 ,...]
+        # dim         3    3      1      3          30            3          30              3 
+        # 0. current state 
+        # 1. goal state 
         # 2. observation
         # In the current setting f_obs is a realative state from the current state so we pass f_v, f_z, yaw_dot to the current state node
-
-        # feature_vector_for_current_state = th.tensor(dataset_obs[i][0:7]).clone().detach().unsqueeze(0).to('cpu')
-        # feature_vector_for_goal = th.tensor(dataset_obs[i][7:10]).clone().detach().unsqueeze(0).to('cpu')
-        # feature_vector_for_obs = th.tensor(dataset_obs[i][10:]).clone().detach().unsqueeze(0).to('cpu')
-
-        # dist_current_state_goal = th.tensor([np.linalg.norm(feature_vector_for_goal[0, :3])], dtype=th.double).to(device)
-        # dist_current_state_obs = th.tensor([np.linalg.norm(feature_vector_for_obs[0, :3])], dtype=th.double).to(device)
-        # dist_goal_obs = th.tensor([np.linalg.norm(feature_vector_for_goal[0,:3]-feature_vector_for_obs[0,:3])], dtype=th.double).to(device)
-
-        feature_vector_for_current_state = dataset_obs[i][0:7]
-        feature_vector_for_goal = dataset_obs[i][7:10]
-        feature_vector_for_obs = dataset_obs[i][10:]
-
-        dist_current_state_goal = np.linalg.norm(feature_vector_for_goal[:3])
-        dist_current_state_obs = np.linalg.norm(feature_vector_for_obs[:3])
-        dist_goal_obs = np.linalg.norm(feature_vector_for_goal[:3]-feature_vector_for_obs[:3])
 
         " ********************* MAKE A DATA OBJECT FOR HETEROGENEUS GRAPH ********************* "
 
@@ -444,24 +450,19 @@ def create_gnn_dataset(dirs, device):
         feature_vector_for_goal = dataset_obs[i][7:10]
         feature_vector_for_obs = dataset_obs[i][10:]
 
-        dist_current_state_goal = np.linalg.norm(feature_vector_for_goal[:3])
+        dist_current_state_goal = np.linalg.norm(feature_vector_for_goal[:3].to('cpu').numpy())
 
         dist_current_state_obs = []
         dist_goal_obs = []
         for j in range(num_of_obst):
-            dist_current_state_obs.append(np.linalg.norm(feature_vector_for_obs[33*j:33*j+3] - feature_vector_for_current_state[:3]))
-            dist_goal_obs.append(np.linalg.norm(feature_vector_for_goal[:3] - feature_vector_for_obs[33*j:33*j+3]))
-
-        dist_current_state_obs = dist_current_state_obs
-        dist_goal_obs = dist_goal_obs
+            dist_current_state_obs.append(np.linalg.norm(feature_vector_for_obs[33*j:33*j+3].to('cpu').numpy()))
+            dist_goal_obs.append(np.linalg.norm((feature_vector_for_goal[:3] - feature_vector_for_obs[33*j:33*j+3]).to('cpu').numpy()))
 
         dist_obst_to_obst = []
         for j in range(num_of_obst):
             for k in range(num_of_obst):
                 if j != k:
-                    dist_obst_to_obst.append(np.linalg.norm(feature_vector_for_obs[33*j:33*j+3] - feature_vector_for_obs[33*k:33*k+3]))
-
-        dist_obst_to_obst = dist_obst_to_obst
+                    dist_obst_to_obst.append((np.linalg.norm(feature_vector_for_obs[33*j:33*j+3] - feature_vector_for_obs[33*k:33*k+3])).to('cpu').numpy())
 
         " ********************* MAKE A DATA OBJECT FOR HETEROGENEUS GRAPH ********************* "
 
@@ -544,3 +545,149 @@ def create_gnn_dataset(dirs, device):
     " ********************* RETURN ********************* "
 
     return dataset
+
+# def create_gnn_dataset(dirs, device, is_visualize=False):
+
+#     """
+#     This function generates a dataset for GNN
+#     """
+
+#     " ********************* GET DATA ********************* "
+
+#     # get obs and acts
+#     dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, is_visualize)
+
+#     " ********************* INITIALIZE DATASET ********************* "
+
+#     dataset = []
+
+#     assert dataset_obs.shape[0] == dataset_acts.shape[0], "the length of dataset_obs and dataset_acts should be the same"
+
+#     for i in range(dataset_obs.shape[0]):
+
+#         " ********************* GET NODES ********************* "
+
+#         # nodes you need for GNN
+#         # dataset = [f_v, f_a, yaw_dot, f_g,  [f_ctrl_pts_o0], bbox_o0, [f_ctrl_pts_o1], bbox_o1 ,...]
+#         # dim         3    3      1      3          30            3          30              3 
+#         # 0. current state 
+#         # 1. goal state 
+#         # 2. observation
+#         # In the current setting f_obs is a realative state from the current state so we pass f_v, f_z, yaw_dot to the current state node
+
+#         feature_vector_for_current_state = dataset_obs[i][0:7]
+#         feature_vector_for_goal = dataset_obs[i][7:10]
+#         feature_vector_for_obs = dataset_obs[i][10:]
+
+#         " ********************* MAKE A DATA OBJECT FOR HETEROGENEUS GRAPH ********************* "
+
+#         data = HeteroData()
+
+#         # add nodes
+#         # get num of obst
+#         num_of_obst = int(len(dataset_obs[i][10:])/33)
+
+#         # if type(dataset_obs[i]) is np.ndarray:
+#         #     warnings.warn("f_obs_n is a numpy array - converting it to a torch tensor")
+#         #     dataset_obs[i] = th.tensor(dataset_obs[i], dtype=th.double).to(device)
+
+#         dist_current_state_goal = th.tensor(np.linalg.norm(feature_vector_for_goal[:3].to('cpu').numpy())).to(device)
+
+#         dist_current_state_obs = []
+#         dist_goal_obs = []
+#         for j in range(num_of_obst):
+#             dist_current_state_obs.append(np.linalg.norm(feature_vector_for_obs[33*j:33*j+3].to('cpu').numpy()))
+#             dist_goal_obs.append(np.linalg.norm((feature_vector_for_goal[:3] - feature_vector_for_obs[33*j:33*j+3]).to('cpu').numpy()))
+
+#         dist_current_state_obs = th.tensor(dist_current_state_obs, dtype=th.float).to(device)
+#         dist_goal_obs = th.tensor(dist_goal_obs, dtype=th.float).to(device)
+
+#         dist_obst_to_obst = []
+#         for j in range(num_of_obst):
+#             for k in range(num_of_obst):
+#                 if j != k:
+#                     dist_obst_to_obst.append(np.linalg.norm(feature_vector_for_obs[33*j:33*j+3] - feature_vector_for_obs[33*k:33*k+3]))
+        
+#         dist_obst_to_obst = th.tensor(dist_obst_to_obst, dtype=th.float).to(device)
+
+#         " ********************* MAKE A DATA OBJECT FOR HETEROGENEUS GRAPH ********************* "
+
+#         # add nodes
+#         data["current_state"].x = feature_vector_for_current_state.float().unsqueeze(0).to(device)
+#         data["goal_state"].x = feature_vector_for_goal.float().unsqueeze(0).to(device)
+#         data["observation"].x = th.stack([feature_vector_for_obs[33*j:33*(j+1)] for j in range(num_of_obst)], dim=0).float().unsqueeze(0).to(device)
+
+#         # add edges
+#         # data["current_state", "dist_current_state_to_goal_state", "goal_state"].edge_index = th.tensor([
+#         #                                                                             [0],  # idx of source nodes (current state)
+#         #                                                                             [0],  # idx of target nodes (goal state)
+#         #                                                                             ],dtype=th.int64)
+#         # data["current_state", "dist_current_state_to_observation", "observation"].edge_index = th.tensor([
+#         #                                                                                 [0],  # idx of source nodes (current state)
+#         #                                                                                 [0],  # idx of target nodes (observation)
+#         #                                                                                 ],dtype=th.int64)
+#         # data["observation", "dist_obs_to_goal", "goal_state"].edge_index = th.tensor([
+#         #                                                                                 [0, 0],  # idx of source nodes (observation)
+#         #                                                                                 [0, 1],  # idx of target nodes (goal state)
+#         #                                                                                 ],dtype=th.int64)
+#         # data["observation", "dist_observation_to_current_state", "current_state"].edge_index = th.tensor([
+#         #                                                                                 [0, 0],  # idx of source nodes (observation)
+#         #                                                                                 [0, 1],  # idx of target nodes (current state)
+#         #                                                                                 ],dtype=th.int64)
+#         # data["goal_state", "dist_goal_state_to_current_state", "current_state"].edge_index = th.tensor([
+#         #                                                                                 [0],  # idx of source nodes (goal state)
+#         #                                                                                 [0],  # idx of target nodes (current state)
+#         #                                                                                 ],dtype=th.int64)
+#         # data["goal_state", "dist_to_obs", "observation"].edge_index = th.tensor([
+#         #                                                                                 [0, 0],  # idx of source nodes (goal state)
+#         #                                                                                 [0, 1],  # idx of target nodes (observation)
+#         #                                                                                 ],dtype=th.int64)
+
+#         data["current_state", "dist_current_state_to_goal_state", "goal_state"].edge_index = th.tensor([
+#                                                                                     [0],  # idx of source nodes (current state)
+#                                                                                     [0],  # idx of target nodes (goal state)
+#                                                                                     ],dtype=th.int64)
+#         data["current_state", "dist_current_state_to_observation", "observation"].edge_index = th.tensor([
+#                                                                                         [0],  # idx of source nodes (current state)
+#                                                                                         [0],  # idx of target nodes (observation)
+#                                                                                         ],dtype=th.int64)
+#         data["observation", "dist_obs_to_goal", "goal_state"].edge_index = th.tensor([
+#                                                                                         [0],  # idx of source nodes (observation)
+#                                                                                         [0],  # idx of target nodes (goal state)
+#                                                                                         ],dtype=th.int64)
+#         data["observation", "dist_observation_to_current_state", "current_state"].edge_index = th.tensor([
+#                                                                                         [0],  # idx of source nodes (observation)
+#                                                                                         [0],  # idx of target nodes (current state)
+#                                                                                         ],dtype=th.int64)
+#         data["goal_state", "dist_goal_state_to_current_state", "current_state"].edge_index = th.tensor([
+#                                                                                         [0],  # idx of source nodes (goal state)
+#                                                                                         [0],  # idx of target nodes (current state)
+#                                                                                         ],dtype=th.int64)
+#         data["goal_state", "dist_to_obs", "observation"].edge_index = th.tensor([
+#                                                                                         [0],  # idx of source nodes (goal state)
+#                                                                                         [0],  # idx of target nodes (observation)
+#                                                                                         ],dtype=th.int64)
+
+#         # add edge weights
+#         data["current_state", "dist_current_state_to_goal_state", "goal_state"].edge_attr = dist_current_state_goal
+#         data["current_state", "dist_current_state_to_observation", "observation"].edge_attr = dist_current_state_obs
+#         data["observation", "dist_obs_to_goal", "goal_state"].edge_attr = dist_goal_obs
+#         # make it undirected
+#         data["observation", "dist_observation_to_current_state", "current_state"].edge_attr = dist_current_state_obs
+#         data["goal_state", "dist_goal_state_to_current_state", "current_state"].edge_attr = dist_current_state_goal
+#         data["goal_state", "dist_goal_to_obs", "observation"].edge_attr = dist_goal_obs
+
+#         # add ground truth trajectory
+#         data.acts = dataset_acts[i].unsqueeze(0).float().to(device)
+        
+#         # add observation
+#         data.obs = dataset_obs[i].unsqueeze(0).float().to(device)
+
+#         # convert the data to the device
+#         data = data.to(device)
+#         # append data to the dataset
+#         dataset.append(data)
+
+#     " ********************* RETURN ********************* "
+
+#     return dataset

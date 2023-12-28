@@ -10,11 +10,13 @@ from diffusers.optimization import get_scheduler
 from tqdm.auto import tqdm
 
 # import
+import torch as th
 import os
 import argparse
+import time
 
 # network utils import
-from utils import ConditionalUnet1D, create_dataset, create_gnn_dataset
+from utils import ConditionalUnet1D, create_dataset, create_gnn_dataset, str2bool
 from torch_geometric.loader import DataLoader as GNNDataLoader
 
 # wanb
@@ -204,27 +206,21 @@ def train(num_epochs, dataloader, device, noise_pred_net, noise_scheduler, ema, 
 
 #     return noise_pred_net
 
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ('yes', 'true', 't', 'y', '1', 'True'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0', 'False'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
-    
 def main():
 
     # args
     parser = argparse.ArgumentParser()
-    parser.add_argument('-d', '--device', default='cpu', help='device', type=str)
+    parser.add_argument('-d', '--device', default='cuda', help='device', type=str)
     parser.add_argument('-g', '--gnn', default=True, help='use gnn', type=str2bool)
+    parser.add_argument('-t', '--test', default=False, help='test (small dataset)', type=str2bool)
     args = parser.parse_args()
+
     "********************* DATA *********************"
 
     # device
-    device = torch.device(args.device)
+    device = th.device(args.device)
+    # th.set_default_dtype(torch.float64)
+    th.set_default_device(device)
 
     # use gnn?
     use_gnn = args.gnn
@@ -235,14 +231,24 @@ def main():
     dirs = "/home/jtorde/Research/puma_ws/src/puma/panther_compression/evals-dir/evals4/tmp_dagger/2/demos/"
 
     # create dataset
-    dataset = create_gnn_dataset(dirs, device) if use_gnn else create_dataset(dirs, device)
+    dataset = create_gnn_dataset(dirs, device, is_visualize=args.test) if use_gnn else create_dataset(dirs, device, is_visualize=args.test)
 
     # parameters (from diffuion policy paper)
-    pred_horizon = 1 
+    pred_horizon = 1
     obs_horizon = 1
 
     # create dataloader
-    if not use_gnn:
+    if use_gnn:
+        # create dataloader for GNN
+        dataloader = GNNDataLoader(
+            dataset,
+            batch_size=256,
+            shuffle=False if str(device)=='cuda' else True,   # shuffle True causes error Expected a 'cuda' str(device) type for generator but found 'cpu' https://github.com/dbolya/yolact/issues/664#issuecomment-878241658
+            num_workers=0 if str(device)=='cuda' else 16 , # if we wanna use cuda, need to set num_workers=0
+            pin_memory=False if str(device)=='cuda' else True, # accelerate cpu-gpu transfer
+            persistent_workers=False if str(device)=='cuda' else True, # if we wanna use cuda, need to set False
+        )
+    else:
         dataloader = torch.utils.data.DataLoader(
             dataset,
             batch_size=32,
@@ -253,21 +259,12 @@ def main():
             # don't kill worker process afte each epoch
             persistent_workers=True
         )
-    else:
-        # create dataloader for GNN
-        dataloader = GNNDataLoader(
-            dataset,
-            batch_size=32,
-            shuffle=True,
-            num_workers=1,
-            persistent_workers=True
-        )
 
     "********************* NETWORK *********************"
 
     # parameters
     # for now we don't use GNN
-    obs_dim = 43
+    obs_dim = 43 # if we use GNN, this will be overwritten in Conditional REsidualBlock1D and won't be used
     action_dim = 22 # 15(pos) + 6(yaw) + 1(time)
 
     # hyperparameters
@@ -278,15 +275,16 @@ def main():
         input_dim=action_dim,
         global_cond_dim=obs_dim*obs_horizon,
         gnn_data=dataset[0] if use_gnn else None,
-        use_gnn=use_gnn
+        use_gnn=use_gnn,
+        device=device
     )
 
     # example inputs
-    noised_action = torch.randn((1, pred_horizon, action_dim))
-    obs = torch.zeros((1, obs_horizon, obs_dim))
+    noised_action = torch.randn((1, pred_horizon, action_dim)).to(device)
+    obs = torch.zeros((1, obs_horizon, obs_dim)).to(device)
 
     # example diffusion iteration
-    diffusion_iter = torch.zeros((1,))
+    diffusion_iter = torch.zeros((1,)).to(device)
 
     # the noise prediction network
     # takes noisy action, diffusion iteration and observation as input
@@ -314,8 +312,6 @@ def main():
     )
 
     # device transfer
-    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    device = torch.device('cpu')
     _ = noise_pred_net.to(device)
 
     "********************* TRAINING LOOP *********************"
