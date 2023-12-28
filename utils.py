@@ -337,7 +337,7 @@ class ConditionalUnet1D(nn.Module):
         # (B,T,C)
         return x
 
-def create_pair_obs_act(dirs, device, is_visualize=False):
+def create_pair_obs_act(dirs, device, max_num_demos, is_visualize=False):
 
     # loop over dirs
     obs_data = th.tensor([]).to(device)
@@ -373,9 +373,9 @@ def create_pair_obs_act(dirs, device, is_visualize=False):
             dataset_obs = th.cat((dataset_obs, obs_data[i, 0, :].unsqueeze(0).unsqueeze(0)), 0)
             dataset_acts = th.cat((dataset_acts, traj_data[i, j, :].unsqueeze(0).unsqueeze(0)), 0)
             idx += 1
-            if idx >= 1000 and is_visualize:
+            if (idx >= 1000 and is_visualize) or idx >= max_num_demos:
                 break
-        if idx >= 1000 and is_visualize:
+        if (idx >= 1000 and is_visualize) or idx >= max_num_demos:
             break
 
     dataset_obs = dataset_obs.squeeze(1)
@@ -388,7 +388,7 @@ def create_pair_obs_act(dirs, device, is_visualize=False):
     return dataset_obs, dataset_acts
 
 
-def create_dataset(dirs, device, is_visualize=False):
+def create_dataset(dirs, device, max_num_demos, is_visualize=False):
     
     """
     Create dataset from npz files in dirs
@@ -398,14 +398,14 @@ def create_dataset(dirs, device, is_visualize=False):
     """
     
     # get obs and acts
-    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, is_visualize)
+    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, max_num_demos, is_visualize)
 
     # create dataset
     dataset = TensorDataset(dataset_obs, dataset_acts)
 
     return dataset
 
-def create_gnn_dataset(dirs, device, is_visualize=False):
+def create_gnn_dataset(dirs, device, max_num_demos, is_visualize=False):
 
     """
     This function generates a dataset for GNN
@@ -414,7 +414,7 @@ def create_gnn_dataset(dirs, device, is_visualize=False):
     " ********************* GET DATA ********************* "
 
     # get obs and acts
-    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, is_visualize)
+    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, max_num_demos, is_visualize)
 
     " ********************* INITIALIZE DATASET ********************* "
 
@@ -462,7 +462,8 @@ def create_gnn_dataset(dirs, device, is_visualize=False):
         for j in range(num_of_obst):
             for k in range(num_of_obst):
                 if j != k:
-                    dist_obst_to_obst.append((np.linalg.norm(feature_vector_for_obs[33*j:33*j+3] - feature_vector_for_obs[33*k:33*k+3])).to('cpu').numpy())
+                    dist_obst_to_obst.append((np.linalg.norm((feature_vector_for_obs[33*j:33*j+3] - feature_vector_for_obs[33*k:33*k+3]).to('cpu').numpy())))
+
 
         " ********************* MAKE A DATA OBJECT FOR HETEROGENEUS GRAPH ********************* "
 
@@ -499,7 +500,7 @@ def create_gnn_dataset(dirs, device, is_visualize=False):
                                                                                             ],dtype=th.int64)
 
         elif num_of_obst == 1:
-            
+
             data["current_state", "dist_current_state_to_goal_state", "goal_state"].edge_index = th.tensor([
                                                                                         [0],  # idx of source nodes (current state)
                                                                                         [0],  # idx of target nodes (goal state)

@@ -226,12 +226,15 @@ def main():
     use_gnn = args.gnn
     print("Use GNN: ", use_gnn)
 
+    # max number of demonstrations
+    max_num_demos = 10000
+
     # list npz files in the directory
     # dirs = "/home/jtorde/Research/puma_ws/src/puma/panther_compression/evals/tmp_dagger/2/demos/"
-    dirs = "/home/jtorde/Research/puma_ws/src/puma/panther_compression/evals-dir/evals4/tmp_dagger/2/demos/"
+    dirs = os.getcwd() + "/../evals-dir/evals4/tmp_dagger/2/demos/"
 
     # create dataset
-    dataset = create_gnn_dataset(dirs, device, is_visualize=args.test) if use_gnn else create_dataset(dirs, device, is_visualize=args.test)
+    dataset = create_gnn_dataset(dirs, device, max_num_demos, is_visualize=args.test) if use_gnn else create_dataset(dirs, device, max_num_demos, is_visualize=args.test)
 
     # parameters (from diffuion policy paper)
     pred_horizon = 1
@@ -242,7 +245,7 @@ def main():
         # create dataloader for GNN
         dataloader = GNNDataLoader(
             dataset,
-            batch_size=256,
+            batch_size=256, # if batch_size is less than 256, then CPU is faster than GPU on my computer
             shuffle=False if str(device)=='cuda' else True,   # shuffle True causes error Expected a 'cuda' str(device) type for generator but found 'cpu' https://github.com/dbolya/yolact/issues/664#issuecomment-878241658
             num_workers=0 if str(device)=='cuda' else 16 , # if we wanna use cuda, need to set num_workers=0
             pin_memory=False if str(device)=='cuda' else True, # accelerate cpu-gpu transfer
