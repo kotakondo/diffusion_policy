@@ -6,8 +6,10 @@ import math
 import torch
 import torch.nn as nn
 import os
+import time
 import numpy as np
 import argparse
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 # torch import
 import torch as th
@@ -17,6 +19,11 @@ from torch.utils.data import TensorDataset
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import HGTConv
 from torch_geometric.nn import Linear as gnn_Linear
+
+# visualization import
+import matplotlib.pyplot as plt
+from compression.utils.other import ObservationManager, ActionManager, getZeroState
+from tqdm import tqdm
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -196,8 +203,7 @@ class ConditionalUnet1D(nn.Module):
         diffusion_step_embed_dim=256,
         down_dims=[256,512,1024],
         kernel_size=5,
-        n_groups=8,
-        device='cuda'
+        n_groups=8
         ):
         """
         input_dim: Dim of actions.
@@ -217,9 +223,9 @@ class ConditionalUnet1D(nn.Module):
         dsed = diffusion_step_embed_dim
         diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed),
-            nn.Linear(dsed, dsed * 4, device=device),
+            nn.Linear(dsed, dsed * 4),
             nn.Mish(),
-            nn.Linear(dsed * 4, dsed, device=device),
+            nn.Linear(dsed * 4, dsed),
         )
         cond_dim = dsed + global_cond_dim
 
@@ -337,11 +343,76 @@ class ConditionalUnet1D(nn.Module):
         # (B,T,C)
         return x
 
-def create_pair_obs_act(dirs, device, max_num_demos, is_visualize=False):
+def network_init(action_dim, obs_dim, obs_horizon, pred_horizon, num_diffusion_iters, dataset_training, use_gnn, device):
+
+    # create network object
+    noise_pred_net = ConditionalUnet1D(
+        input_dim=action_dim,
+        global_cond_dim=obs_dim*obs_horizon,
+        gnn_data=dataset_training[0] if use_gnn else None,
+        use_gnn=use_gnn,
+    )
+
+    # example inputs
+    noised_action = torch.randn((1, pred_horizon, action_dim)).to(device)
+    obs = torch.zeros((1, obs_horizon, obs_dim)).to(device)
+
+    # example diffusion iteration
+    diffusion_iter = torch.zeros((1,)).to(device)
+
+    # the noise prediction network
+    # takes noisy action, diffusion iteration and observation as input
+    # predicts the noise added to action
+    # you need to run noise_pred_net to initialize the network https://stackoverflow.com/questions/75550160/how-to-set-requires-grad-to-false-freeze-pytorch-lazy-layers
+    x_dict = dataset_training[0].x_dict if use_gnn else None
+    edge_index_dict = dataset_training[0].edge_index_dict if use_gnn else None
+    noise = noise_pred_net(
+        sample=noised_action,
+        timestep=diffusion_iter,
+        global_cond=obs.flatten(start_dim=1),
+        x_dict=x_dict,
+        edge_index_dict=edge_index_dict)
+
+    # for this demo, we use DDPMScheduler with 100 diffusion iterations
+    noise_scheduler = DDPMScheduler(
+        num_train_timesteps=num_diffusion_iters,
+        # the choise of beta schedule has big impact on performance
+        # we found squared cosine works the best
+        beta_schedule='squaredcos_cap_v2',
+        # clip output to [-1,1] to improve stability
+        clip_sample=True,
+        # our network predicts noise (instead of denoised action)
+        prediction_type='epsilon'
+    )
+
+    # device transfer
+    _ = noise_pred_net.to(device)
+
+    return noise_pred_net, noise_scheduler
+
+
+def create_pair_obs_act(dirs, device, **kwargs):
+
+    """
+    Create dataset from npz files in dirs
+    
+    @param dirs: directory containing npz files
+    @param device: device to transfer data to
+    @param: kwargs: max_num_training_demos, percentage_training, percentage_eval, percentage_test
+    @return dataset: TensorDataset
+    """
+
+    # unpack kwargs
+    max_num_training_demos = kwargs.get('max_num_training_demos')
+    percentage_training = kwargs.get('percentage_training')
+    percentage_eval = kwargs.get('percentage_eval')
+    percentage_test = kwargs.get('percentage_test')
+    total_num_demos = max_num_training_demos / percentage_training
 
     # loop over dirs
     obs_data = th.tensor([]).to(device)
     traj_data = th.tensor([]).to(device)
+
     # list dirs in dirs
     dirs = [ f.path for f in os.scandir(dirs) if f.is_dir() ]
     for dir in dirs:
@@ -359,12 +430,11 @@ def create_pair_obs_act(dirs, device, max_num_demos, is_visualize=False):
             obs_data = th.cat((obs_data, th.from_numpy(obs).float().to(device)), 0)
             traj_data = th.cat((traj_data, th.from_numpy(acts).float().to(device)), 0)
 
-    print("dataset before rearranging: ")
-    print("obs_data.shape: ", obs_data.shape)
-    print("traj_data.shape: ", traj_data.shape)
+    # print out the total data size
+    print(f"original data size: {obs_data.shape[0] * traj_data.shape[1]}") # obs_data.shape[0] is the num of demos, traj_data.shape[1] is num of trajs per each demo (default is 10)
 
+    # rearanage the data
     assert obs_data.shape[0] == traj_data.shape[0], "obs_data and traj_data must have the same number of samples"
-
     dataset_obs = th.tensor([]).to(device)
     dataset_acts = th.tensor([]).to(device)
     idx = 0
@@ -373,50 +443,38 @@ def create_pair_obs_act(dirs, device, max_num_demos, is_visualize=False):
             dataset_obs = th.cat((dataset_obs, obs_data[i, 0, :].unsqueeze(0).unsqueeze(0)), 0)
             dataset_acts = th.cat((dataset_acts, traj_data[i, j, :].unsqueeze(0).unsqueeze(0)), 0)
             idx += 1
-            if (idx >= 1000 and is_visualize) or idx >= max_num_demos:
+            if idx >= total_num_demos:
                 break
-        if (idx >= 1000 and is_visualize) or idx >= max_num_demos:
-            break
+        else:
+            continue
+        break
 
-    dataset_obs = dataset_obs.squeeze(1)
-    dataset_acts = dataset_acts.squeeze(1)
+    # split the dataset into training, eval, and test
+    dataset_obs_training = dataset_obs[0:int(dataset_obs.shape[0]*percentage_training)]
+    dataset_acts_training = dataset_acts[0:int(dataset_acts.shape[0]*percentage_training)]
+    dataset_obs_eval = dataset_obs[int(dataset_obs.shape[0]*percentage_training):int(dataset_obs.shape[0]*(percentage_training+percentage_eval))]
+    dataset_acts_eval = dataset_acts[int(dataset_acts.shape[0]*percentage_training):int(dataset_acts.shape[0]*(percentage_training+percentage_eval))]
+    dataset_obs_test = dataset_obs[int(dataset_obs.shape[0]*(percentage_training+percentage_eval)):]
+    dataset_acts_test = dataset_acts[int(dataset_acts.shape[0]*(percentage_training+percentage_eval)):]
 
-    print("dataset after rearranging: ")
-    print("dataset_obs.shape: ", dataset_obs.shape)
-    print("dataset_acts.shape: ", dataset_acts.shape)
+    # resize the dataset
+    dataset_obs_training = dataset_obs_training.squeeze(1)
+    dataset_acts_training = dataset_acts_training.squeeze(1)
+    dataset_obs_eval = dataset_obs_eval.squeeze(1)
+    dataset_acts_eval = dataset_acts_eval.squeeze(1)
+    dataset_obs_test = dataset_obs_test.squeeze(1)
+    dataset_acts_test = dataset_acts_test.squeeze(1)
 
-    return dataset_obs, dataset_acts
+    # print out the dataset size
+    print(f"dataset after rearranging: training data size: {dataset_obs_training.shape[0]}")
 
+    return dataset_obs_training, dataset_acts_training, dataset_obs_eval, dataset_acts_eval, dataset_obs_test, dataset_acts_test
 
-def create_dataset(dirs, device, max_num_demos, is_visualize=False):
-    
-    """
-    Create dataset from npz files in dirs
-    @param dirs: directory containing npz files
-    @param device: device to transfer data to
-    @return dataset: TensorDataset
-    """
-    
-    # get obs and acts
-    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, max_num_demos, is_visualize)
-
-    # create dataset
-    dataset = TensorDataset(dataset_obs, dataset_acts)
-
-    return dataset
-
-def create_gnn_dataset(dirs, device, max_num_demos, is_visualize=False):
+def create_gnn_dataset_from_obs_and_acts(dataset_obs, dataset_acts, device):
 
     """
     This function generates a dataset for GNN
     """
-
-    " ********************* GET DATA ********************* "
-
-    # get obs and acts
-    dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, max_num_demos, is_visualize)
-
-    " ********************* INITIALIZE DATASET ********************* "
 
     dataset = []
 
@@ -550,148 +608,266 @@ def create_gnn_dataset(dirs, device, max_num_demos, is_visualize=False):
 
     return dataset
 
-# def create_gnn_dataset(dirs, device, is_visualize=False):
+def create_dataset(dirs, device, **kwargs):
+    
+    """
+    Create dataset from npz files in dirs
+    @param dirs: directory containing npz files
+    @param device: device to transfer data to
+    @return dataset: TensorDataset
+    """
+    
+    # get obs and acts
+    dataset_obs_training, dataset_acts_training, dataset_obs_eval, dataset_acts_eval, dataset_obs_test, dataset_acts_test = create_pair_obs_act(dirs, device, **kwargs)
 
-#     """
-#     This function generates a dataset for GNN
-#     """
+    # create dataset
+    dataset_training = TensorDataset(dataset_obs_training, dataset_acts_training)
+    dataset_eval = TensorDataset(dataset_obs_eval, dataset_acts_eval)
+    dataset_test = TensorDataset(dataset_obs_test, dataset_acts_test)
 
-#     " ********************* GET DATA ********************* "
+    return dataset_training, dataset_eval, dataset_test
 
-#     # get obs and acts
-#     dataset_obs, dataset_acts = create_pair_obs_act(dirs, device, is_visualize)
+def create_gnn_dataset(dirs, device, **kwargs):
 
-#     " ********************* INITIALIZE DATASET ********************* "
+    """
+    This function generates a dataset for GNN
+    """
 
-#     dataset = []
+    " ********************* GET DATA ********************* "
 
-#     assert dataset_obs.shape[0] == dataset_acts.shape[0], "the length of dataset_obs and dataset_acts should be the same"
+    # get obs and acts
+    dataset_obs_training, dataset_acts_training, dataset_obs_eval, dataset_acts_eval, dataset_obs_test, dataset_acts_test = create_pair_obs_act(dirs, device, **kwargs)
 
-#     for i in range(dataset_obs.shape[0]):
+    # create dataset
+    dataset_training = create_gnn_dataset_from_obs_and_acts(dataset_obs_training, dataset_acts_training, device)
+    dataset_eval = create_gnn_dataset_from_obs_and_acts(dataset_obs_eval, dataset_acts_eval, device)
+    dataset_test = create_gnn_dataset_from_obs_and_acts(dataset_obs_test, dataset_acts_test, device)
 
-#         " ********************* GET NODES ********************* "
+    return dataset_training, dataset_eval, dataset_test
 
-#         # nodes you need for GNN
-#         # dataset = [f_v, f_a, yaw_dot, f_g,  [f_ctrl_pts_o0], bbox_o0, [f_ctrl_pts_o1], bbox_o1 ,...]
-#         # dim         3    3      1      3          30            3          30              3 
-#         # 0. current state 
-#         # 1. goal state 
-#         # 2. observation
-#         # In the current setting f_obs is a realative state from the current state so we pass f_v, f_z, yaw_dot to the current state node
+def get_nactions(noise_pred_net, noise_scheduler, dataset, pred_horizon, num_diffusion_iters, action_dim, use_gnn, device, is_visualize=True, num_eval=None):
 
-#         feature_vector_for_current_state = dataset_obs[i][0:7]
-#         feature_vector_for_goal = dataset_obs[i][7:10]
-#         feature_vector_for_obs = dataset_obs[i][10:]
+    """
+    This function generates a predicted trajectory
+    """
 
-#         " ********************* MAKE A DATA OBJECT FOR HETEROGENEUS GRAPH ********************* "
+    # set model to evaluation mode
+    noise_pred_net.eval()
 
-#         data = HeteroData()
+    # set batch size to 1
+    B = 1
 
-#         # add nodes
-#         # get num of obst
-#         num_of_obst = int(len(dataset_obs[i][10:])/33)
+    # num of data to load
+    num_data_to_load = len(dataset) if num_eval is None else num_eval
 
-#         # if type(dataset_obs[i]) is np.ndarray:
-#         #     warnings.warn("f_obs_n is a numpy array - converting it to a torch tensor")
-#         #     dataset_obs[i] = th.tensor(dataset_obs[i], dtype=th.double).to(device)
+    # loop over the dataset
+    print("start denoising...")
+    expert_actions, nactions, nobses, times = [], [], [], []
+    for dataset_idx in tqdm(range(num_data_to_load), desc="data idx"):
 
-#         dist_current_state_goal = th.tensor(np.linalg.norm(feature_vector_for_goal[:3].to('cpu').numpy())).to(device)
+        # stack the last obs_horizon (2) number of observations
+        nobs = dataset[dataset_idx].obs if use_gnn else dataset[dataset_idx][0].unsqueeze(0)
+        expert_action = dataset[dataset_idx].acts if use_gnn else dataset[dataset_idx][1].unsqueeze(0)
 
-#         dist_current_state_obs = []
-#         dist_goal_obs = []
-#         for j in range(num_of_obst):
-#             dist_current_state_obs.append(np.linalg.norm(feature_vector_for_obs[33*j:33*j+3].to('cpu').numpy()))
-#             dist_goal_obs.append(np.linalg.norm((feature_vector_for_goal[:3] - feature_vector_for_obs[33*j:33*j+3]).to('cpu').numpy()))
+        # infer action
+        with torch.no_grad():
 
-#         dist_current_state_obs = th.tensor(dist_current_state_obs, dtype=th.float).to(device)
-#         dist_goal_obs = th.tensor(dist_goal_obs, dtype=th.float).to(device)
+            # reshape observation to (B,obs_horizon*obs_dim)
+            obs_cond = nobs.unsqueeze(0).flatten(start_dim=1)
 
-#         dist_obst_to_obst = []
-#         for j in range(num_of_obst):
-#             for k in range(num_of_obst):
-#                 if j != k:
-#                     dist_obst_to_obst.append(np.linalg.norm(feature_vector_for_obs[33*j:33*j+3] - feature_vector_for_obs[33*k:33*k+3]))
+            # initialize action from Guassian noise
+            noisy_action = torch.randn(
+                (B, pred_horizon, action_dim), device=device)
+            naction = noisy_action
+
+            # init scheduler
+            noise_scheduler.set_timesteps(num_diffusion_iters)
+
+            # start timer
+            start_time = time.time()
+
+            for k in tqdm(noise_scheduler.timesteps, desc="diffusion iter k"):
+                # predict noise
+
+                if use_gnn:
+                    x_dict = dataset[dataset_idx].x_dict
+                    edge_index_dict = dataset[dataset_idx].edge_index_dict
+                    noise_pred = noise_pred_net(
+                        sample=naction,
+                        timestep=k,
+                        global_cond=obs_cond,
+                        x_dict=x_dict,
+                        edge_index_dict=edge_index_dict
+                    )
+                else:
+                    noise_pred = noise_pred_net(
+                        sample=naction,
+                        timestep=k,
+                        global_cond=obs_cond
+                    )
+
+                # inverse diffusion step (remove noise)
+                naction = noise_scheduler.step(
+                    model_output=noise_pred,
+                    timestep=k,
+                    sample=naction
+                ).prev_sample
+
+            # end timer
+            end_time = time.time()
+            times.append(end_time - start_time)
+
+        # append to the list
+        expert_actions.append(expert_action.cpu().numpy())
+        nactions.append(naction.squeeze(0).cpu().numpy())
+        nobses.append(nobs.cpu().numpy())
+
+        # print out the computation time
+        print("computation time: ", np.mean(times))
+
+        # visualize trajectory
+        if is_visualize:
+            visualize_trajectory(expert_actions, nactions, nobs, dataset_idx)
+
+    if not is_visualize: # used get_nactions used in evaluation
+        return expert_actions, nactions, nobses
+
+def visualize_trajectory(expert_actions, action_preds, nobs, image_idx):
+
+    # get action and observation manager for normalization and denormalization
+    am = ActionManager() # get action manager
+    om = ObservationManager() # get observation manager
+
+    # plot 
+    fig = plt.figure(figsize=(20, 20))
+    ax = fig.add_subplot(211, projection='3d')
+
+    assert len(action_preds) == len(expert_actions), "the number of predicted trajectories and true trajectories should be the same"
+
+    # position trajectory
+    idx = 0
+    for action_pred, expert_action in zip(action_preds, expert_actions):
+
+        pred_traj = am.denormalizeTraj(action_pred)
+        true_traj = am.denormalizeTraj(expert_action)
+
+        # convert the trajectory to a b-spline
+        start_state = getZeroState()
+        w_posBS_pred, w_yawBS_pred = am.f_trajAnd_w_State2wBS(pred_traj, start_state)
+        w_posBS_true, w_yawBS_true = am.f_trajAnd_w_State2wBS(true_traj, start_state)
+        num_vectors_pos = 100
+        num_vectors_yaw = 10
+        time_pred = np.linspace(w_posBS_pred.getT0(), w_posBS_pred.getTf(), num_vectors_pos)
+        time_yaw_pred = np.linspace(w_yawBS_pred.getT0(), w_yawBS_pred.getTf(), num_vectors_yaw)
+        time_true = np.linspace(w_posBS_true.getT0(), w_posBS_true.getTf(), num_vectors_pos)
+        time_yaw_true = np.linspace(w_yawBS_true.getT0(), w_yawBS_true.getTf(), num_vectors_yaw)
+
+        # plot the predicted trajectory
+        if idx == 0:
+            ax.plot(w_posBS_true.pos_bs[0](time_true), w_posBS_true.pos_bs[1](time_true), w_posBS_true.pos_bs[2](time_true), lw=4, alpha=0.7, label='Expert', c='green')
+            ax.plot(w_posBS_pred.pos_bs[0](time_pred), w_posBS_pred.pos_bs[1](time_pred), w_posBS_pred.pos_bs[2](time_pred), lw=4, alpha=0.7, label='GNN', c='orange')
+
+            # plot the start and goal position
+            ax.scatter(w_posBS_true.pos_bs[0](w_posBS_true.getT0()), w_posBS_true.pos_bs[1](w_posBS_true.getT0()), w_posBS_true.pos_bs[2](w_posBS_true.getT0()), s=100, c='pink', marker='o', label='Start')
+
+        else:
+            ax.plot(w_posBS_true.pos_bs[0](time_true), w_posBS_true.pos_bs[1](time_true), w_posBS_true.pos_bs[2](time_true), lw=4, alpha=0.7, c='green')
+            ax.plot(w_posBS_pred.pos_bs[0](time_pred), w_posBS_pred.pos_bs[1](time_pred), w_posBS_pred.pos_bs[2](time_pred), lw=4, alpha=0.7, c='orange')
+
+        idx += 1
+        if idx > len(action_preds):
+            break
+
+    # plot the goal
+    f_obs = om.denormalizeObservation(nobs.to('cpu').numpy())
+    ax.scatter(f_obs[0][7], f_obs[0][8], f_obs[0][9], s=100, c='red', marker='*', label='Goal')
+    
+    # plot the obstacles
+    # get w pos of the obstacles
+    w_obs_poses = []
+    p0 = start_state.w_pos[0] # careful here: we assume the agent pos is at the origin - as the agent moves we expect the obstacles shift accordingly
+    
+    # extract each obstacle trajs
+    num_obst = int(len(f_obs[0][10:])/33)
+    for i in range(num_obst):
         
-#         dist_obst_to_obst = th.tensor(dist_obst_to_obst, dtype=th.float).to(device)
+        # get each obstacle's trajectory
+        f_obs_each = f_obs[0][10+33*i:10+33*(i+1)]
+    
+        # get each obstacle's poses in that trajectory in the world frame
+        for i in range(int(len(f_obs_each[:-3])/3)):
+            w_obs_poses.append((f_obs_each[3*i:3*i+3] - p0.T).tolist())
 
-#         " ********************* MAKE A DATA OBJECT FOR HETEROGENEUS GRAPH ********************* "
+        # get each obstacle's bbox
+        bbox = f_obs_each[-3:]
 
-#         # add nodes
-#         data["current_state"].x = feature_vector_for_current_state.float().unsqueeze(0).to(device)
-#         data["goal_state"].x = feature_vector_for_goal.float().unsqueeze(0).to(device)
-#         data["observation"].x = th.stack([feature_vector_for_obs[33*j:33*(j+1)] for j in range(num_of_obst)], dim=0).float().unsqueeze(0).to(device)
+        # plot the bbox
+        for idx, w_obs_pos in enumerate(w_obs_poses):
+            # obstacle's position
+            # bbox (8 points)
+            p1 = [w_obs_pos[0] + bbox[0]/2, w_obs_pos[1] + bbox[1]/2, w_obs_pos[2] + bbox[2]/2]
+            p2 = [w_obs_pos[0] + bbox[0]/2, w_obs_pos[1] + bbox[1]/2, w_obs_pos[2] - bbox[2]/2]
+            p3 = [w_obs_pos[0] + bbox[0]/2, w_obs_pos[1] - bbox[1]/2, w_obs_pos[2] + bbox[2]/2]
+            p4 = [w_obs_pos[0] + bbox[0]/2, w_obs_pos[1] - bbox[1]/2, w_obs_pos[2] - bbox[2]/2]
+            p5 = [w_obs_pos[0] - bbox[0]/2, w_obs_pos[1] + bbox[1]/2, w_obs_pos[2] + bbox[2]/2]
+            p6 = [w_obs_pos[0] - bbox[0]/2, w_obs_pos[1] + bbox[1]/2, w_obs_pos[2] - bbox[2]/2]
+            p7 = [w_obs_pos[0] - bbox[0]/2, w_obs_pos[1] - bbox[1]/2, w_obs_pos[2] + bbox[2]/2]
+            p8 = [w_obs_pos[0] - bbox[0]/2, w_obs_pos[1] - bbox[1]/2, w_obs_pos[2] - bbox[2]/2]
+            # bbox lines (12 lines)
+            if idx == 0 and i == 0:
+                ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], lw=2, alpha=0.7, c='blue', label='Obstacle')
+            else:
+                ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p1[0], p3[0]], [p1[1], p3[1]], [p1[2], p3[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p1[0], p5[0]], [p1[1], p5[1]], [p1[2], p5[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p2[0], p4[0]], [p2[1], p4[1]], [p2[2], p4[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p2[0], p6[0]], [p2[1], p6[1]], [p2[2], p6[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p3[0], p4[0]], [p3[1], p4[1]], [p3[2], p4[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p3[0], p7[0]], [p3[1], p7[1]], [p3[2], p7[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p4[0], p8[0]], [p4[1], p8[1]], [p4[2], p8[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p5[0], p6[0]], [p5[1], p6[1]], [p5[2], p6[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p5[0], p7[0]], [p5[1], p7[1]], [p5[2], p7[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p6[0], p8[0]], [p6[1], p8[1]], [p6[2], p8[2]], lw=2, alpha=0.7, c='blue')
+            ax.plot([p7[0], p8[0]], [p7[1], p8[1]], [p7[2], p8[2]], lw=2, alpha=0.7, c='blue')
 
-#         # add edges
-#         # data["current_state", "dist_current_state_to_goal_state", "goal_state"].edge_index = th.tensor([
-#         #                                                                             [0],  # idx of source nodes (current state)
-#         #                                                                             [0],  # idx of target nodes (goal state)
-#         #                                                                             ],dtype=th.int64)
-#         # data["current_state", "dist_current_state_to_observation", "observation"].edge_index = th.tensor([
-#         #                                                                                 [0],  # idx of source nodes (current state)
-#         #                                                                                 [0],  # idx of target nodes (observation)
-#         #                                                                                 ],dtype=th.int64)
-#         # data["observation", "dist_obs_to_goal", "goal_state"].edge_index = th.tensor([
-#         #                                                                                 [0, 0],  # idx of source nodes (observation)
-#         #                                                                                 [0, 1],  # idx of target nodes (goal state)
-#         #                                                                                 ],dtype=th.int64)
-#         # data["observation", "dist_observation_to_current_state", "current_state"].edge_index = th.tensor([
-#         #                                                                                 [0, 0],  # idx of source nodes (observation)
-#         #                                                                                 [0, 1],  # idx of target nodes (current state)
-#         #                                                                                 ],dtype=th.int64)
-#         # data["goal_state", "dist_goal_state_to_current_state", "current_state"].edge_index = th.tensor([
-#         #                                                                                 [0],  # idx of source nodes (goal state)
-#         #                                                                                 [0],  # idx of target nodes (current state)
-#         #                                                                                 ],dtype=th.int64)
-#         # data["goal_state", "dist_to_obs", "observation"].edge_index = th.tensor([
-#         #                                                                                 [0, 0],  # idx of source nodes (goal state)
-#         #                                                                                 [0, 1],  # idx of target nodes (observation)
-#         #                                                                                 ],dtype=th.int64)
+    ax.grid(True)
+    ax.legend(loc='best')
+    ax.set_xlim(-2, 15)
+    ax.set_ylim(-4, 4)
+    ax.set_zlim(-5, 5)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_aspect('equal')
 
-#         data["current_state", "dist_current_state_to_goal_state", "goal_state"].edge_index = th.tensor([
-#                                                                                     [0],  # idx of source nodes (current state)
-#                                                                                     [0],  # idx of target nodes (goal state)
-#                                                                                     ],dtype=th.int64)
-#         data["current_state", "dist_current_state_to_observation", "observation"].edge_index = th.tensor([
-#                                                                                         [0],  # idx of source nodes (current state)
-#                                                                                         [0],  # idx of target nodes (observation)
-#                                                                                         ],dtype=th.int64)
-#         data["observation", "dist_obs_to_goal", "goal_state"].edge_index = th.tensor([
-#                                                                                         [0],  # idx of source nodes (observation)
-#                                                                                         [0],  # idx of target nodes (goal state)
-#                                                                                         ],dtype=th.int64)
-#         data["observation", "dist_observation_to_current_state", "current_state"].edge_index = th.tensor([
-#                                                                                         [0],  # idx of source nodes (observation)
-#                                                                                         [0],  # idx of target nodes (current state)
-#                                                                                         ],dtype=th.int64)
-#         data["goal_state", "dist_goal_state_to_current_state", "current_state"].edge_index = th.tensor([
-#                                                                                         [0],  # idx of source nodes (goal state)
-#                                                                                         [0],  # idx of target nodes (current state)
-#                                                                                         ],dtype=th.int64)
-#         data["goal_state", "dist_to_obs", "observation"].edge_index = th.tensor([
-#                                                                                         [0],  # idx of source nodes (goal state)
-#                                                                                         [0],  # idx of target nodes (observation)
-#                                                                                         ],dtype=th.int64)
+    # plot the yaw trajectory
+    ax = fig.add_subplot(212)
 
-#         # add edge weights
-#         data["current_state", "dist_current_state_to_goal_state", "goal_state"].edge_attr = dist_current_state_goal
-#         data["current_state", "dist_current_state_to_observation", "observation"].edge_attr = dist_current_state_obs
-#         data["observation", "dist_obs_to_goal", "goal_state"].edge_attr = dist_goal_obs
-#         # make it undirected
-#         data["observation", "dist_observation_to_current_state", "current_state"].edge_attr = dist_current_state_obs
-#         data["goal_state", "dist_goal_state_to_current_state", "current_state"].edge_attr = dist_current_state_goal
-#         data["goal_state", "dist_goal_to_obs", "observation"].edge_attr = dist_goal_obs
+    idx = 0
+    for action_pred, expert_action in zip(action_preds, expert_actions):
 
-#         # add ground truth trajectory
-#         data.acts = dataset_acts[i].unsqueeze(0).float().to(device)
-        
-#         # add observation
-#         data.obs = dataset_obs[i].unsqueeze(0).float().to(device)
+        pred_traj = am.denormalizeTraj(action_pred)
+        true_traj = am.denormalizeTraj(expert_action)
 
-#         # convert the data to the device
-#         data = data.to(device)
-#         # append data to the dataset
-#         dataset.append(data)
+        # convert the trajectory to a b-spline
+        start_state = getZeroState()
+        w_posBS_pred, w_yawBS_pred = am.f_trajAnd_w_State2wBS(pred_traj, start_state)
+        w_posBS_true, w_yawBS_true = am.f_trajAnd_w_State2wBS(true_traj, start_state)
 
-#     " ********************* RETURN ********************* "
+        if idx == 0:
+            ax.plot(time_yaw_true, w_yawBS_true.pos_bs[0](time_yaw_true), lw=4, alpha=0.7, label='Expert', c='green')
+            ax.plot(time_yaw_pred, w_yawBS_pred.pos_bs[0](time_yaw_pred), lw=4, alpha=0.7, label='Diffusion', c='orange')
+        else:
+            ax.plot(time_yaw_true, w_yawBS_true.pos_bs[0](time_yaw_true), lw=4, alpha=0.7, c='green')
+            ax.plot(time_yaw_pred, w_yawBS_pred.pos_bs[0](time_yaw_pred), lw=4, alpha=0.7, c='orange')
 
-#     return dataset
+        idx += 1
+        if idx > len(action_preds):
+            break
+
+    ax.grid(True)
+    ax.legend(loc='best')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Yaw')
+    fig.savefig(f'/media/jtorde/T7/gdp/pngs/image_{image_idx}.png')
+    # plt.show()
