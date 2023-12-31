@@ -228,7 +228,7 @@ def train_loop_diffusion_model(num_epochs, dataloader_training, dataset_training
                     wandb.log({'loss': loss, 'epoch': epoch_idx})
 
                 # save model
-                th.save(noise_pred_net.state_dict(), f'{save_dir}/num_{epoch_counter}_noise_pred_net.pth')
+                th.save(noise_pred_net.state_dict(), f'{save_dir}/diffusion_num_{epoch_counter}.pth')
                 epoch_counter += 1
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
@@ -478,7 +478,7 @@ def train_loop_lstm(num_epochs, dataloader_training, dataset_training, dataset_e
                     wandb.log({'loss': loss, 'epoch': epoch_idx})
 
                 # save model
-                th.save(policy.state_dict(), f'{save_dir}/mlp_num_{epoch_counter}.pth')
+                th.save(policy.state_dict(), f'{save_dir}/lstm_num_{epoch_counter}.pth')
                 epoch_counter += 1
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
@@ -622,7 +622,7 @@ def train_loop_transformer(num_epochs, dataloader_training, dataset_training, da
                     wandb.log({'loss': loss, 'epoch': epoch_idx})
 
                 # save model
-                th.save(policy.state_dict(), f'{save_dir}/mlp_num_{epoch_counter}.pth')
+                th.save(policy.state_dict(), f'{save_dir}/transformer_num_{epoch_counter}.pth')
                 epoch_counter += 1
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
@@ -662,8 +662,6 @@ def train_loop_transformer(num_epochs, dataloader_training, dataset_training, da
                 break
             
     return policy
-
-
 
 def train_transformer(num_epochs, dataloader_training, dataset_training, policy, dataset_eval, action_dim, save_dir, num_eval):
 
