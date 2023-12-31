@@ -1,15 +1,13 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 
 # diffusion policy import
-from typing import Union
-import math
 import torch
-import torch.nn as nn
 import os
 import time
 import numpy as np
 import argparse
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from diffusers import DPMSolverMultistepScheduler
 
 # torch import
 import torch as th
@@ -17,15 +15,22 @@ from torch.utils.data import TensorDataset
 
 # gnn import
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import HGTConv
-from torch_geometric.nn import Linear as gnn_Linear
 
 # visualization import
 import matplotlib.pyplot as plt
 from compression.utils.other import ObservationManager, ActionManager, getZeroState
-from tqdm import tqdm
+
+# calculate loss
+from scipy.optimize import linear_sum_assignment
+
+# network utils import
+from network_utils import ConditionalUnet1D
 
 def str2bool(v):
+    """
+    This function converts string to boolean (mainly used for argparse)
+    """
+
     if isinstance(v, bool):
         return v
     if v.lower() in ('yes', 'true', 't', 'y', '1', 'True'):
@@ -34,316 +39,8 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
-    
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
 
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
-
-class Downsample1d(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.conv = nn.Conv1d(dim, dim, 3, 2, 1)
-
-    def forward(self, x):
-        return self.conv(x)
-
-class Upsample1d(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.conv = nn.ConvTranspose1d(dim, dim, 3, 2, 1) # not sure why but the default kernel_size was set to 4
-
-    def forward(self, x):
-        return self.conv(x)
-
-class Conv1dBlock(nn.Module):
-    '''
-        Conv1d --> GroupNorm --> Mish
-    '''
-
-    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
-        super().__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv1d(inp_channels, out_channels, kernel_size, padding=kernel_size // 2),
-            nn.GroupNorm(n_groups, out_channels),
-            nn.Mish(),
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
-class ConditionalResidualBlock1D(nn.Module):
-    def __init__(self,
-            in_channels,
-            out_channels,
-            cond_dim,
-            kernel_size=3,
-            n_groups=8,
-            use_gnn=True,
-            gnn_data=None,
-            gnn_hidden_channels=128,
-            gnn_num_layers=4,
-            gnn_num_heads=8,
-            group='max',
-            num_linear_layers=2,
-            linear_hidden_channels=2048,
-            ):
-        super().__init__()
-
-        self.blocks = nn.ModuleList([
-            Conv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups),
-            Conv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups),
-        ])
-
-        # FiLM modulation https://arxiv.org/abs/1709.07871
-        # predicts per-channel scale and bias
-        cond_channels = out_channels * 2
-        self.out_channels = out_channels
-        cond_dim = gnn_hidden_channels if use_gnn else cond_dim
-        self.cond_encoder = nn.Sequential(
-            nn.Mish(),
-            nn.Linear(cond_dim, cond_channels),
-            nn.Unflatten(-1, (-1, 1))
-        )
-
-        self.use_gnn = use_gnn
-        self.gnn_data = gnn_data
-        self.gnn_hidden_channels = gnn_hidden_channels
-        self.gnn_num_layers = gnn_num_layers
-        self.gnn_num_heads = gnn_num_heads
-        self.group = group
-        self.num_linear_layers = num_linear_layers
-        self.linear_hidden_channels = linear_hidden_channels
-        self.out_channels = out_channels
-
-        if self.use_gnn:
-            self.lin_dict = th.nn.ModuleDict()
-            for node_type in self.gnn_data.node_types:
-                self.lin_dict[node_type] = gnn_Linear(-1, self.gnn_hidden_channels)
-
-            # HGTConv Layers
-            self.convs = th.nn.ModuleList()
-            for _ in range(self.gnn_num_layers):
-                conv = HGTConv(self.gnn_hidden_channels, self.gnn_hidden_channels, self.gnn_data.metadata(), self.gnn_num_heads, group=self.group)
-                self.convs.append(conv)
-
-            # add linear layers (num_linear_layers) times
-            # self.lins = th.nn.ModuleList()
-            # for _ in range(num_linear_layers-1):
-            #     self.lins.append(gnn_Linear(-1, linear_hidden_channels)) 
-            # self.lins.append(gnn_Linear(-1, self.out_channels))
-
-        # make sure dimensions compatible
-        self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
-            if in_channels != out_channels else nn.Identity()
-        
-        # make it float
-        self = self.float()
-
-    def forward(self, x, cond=None, x_dict=None, edge_index_dict=None):
-        '''
-            x : [ batch_size x in_channels x horizon ]
-            cond : [ batch_size x cond_dim]
-
-            returns:
-            out : [ batch_size x out_channels x horizon ]
-        '''
-        out = self.blocks[0](x)
-
-        if self.use_gnn and x_dict is not None and edge_index_dict is not None:
-
-            for node_type, x_gnn in x_dict.items():
-                # if x_gnn is double then convert it to float
-                # if type(x_gnn) is th.Tensor:
-                #     if x_gnn.dtype == th.double:
-                #         x_gnn = x_gnn.float()
-
-                # print out what device x_gnn is on
-                x_dict[node_type] = self.lin_dict[node_type](x_gnn).relu_()
-
-            for conv in self.convs:
-                x_dict = conv(x_dict, edge_index_dict)
-
-            # extract the latent vector
-            cond = x_dict["current_state"]
-
-            # add linear layers
-            # for lin in self.lins:
-            #     cond = lin(cond)
-        
-        embed = self.cond_encoder(cond)
-
-        embed = embed.reshape(
-            embed.shape[0], 2, self.out_channels, 1)
-        scale = embed[:,0,...]
-        bias = embed[:,1,...]
-        out = scale * out + bias
-
-        out = self.blocks[1](out)
-        out = out + self.residual_conv(x)
-        return out
-
-
-class ConditionalUnet1D(nn.Module):
-    def __init__(self,
-        input_dim,
-        global_cond_dim,
-        gnn_data,
-        use_gnn,
-        diffusion_step_embed_dim=256,
-        down_dims=[256,512,1024],
-        kernel_size=5,
-        n_groups=8
-        ):
-        """
-        input_dim: Dim of actions.
-        global_cond_dim: Dim of global conditioning applied with FiLM
-          in addition to diffusion step embedding. This is usually obs_horizon * obs_dim
-        diffusion_step_embed_dim: Size of positional encoding for diffusion iteration k
-        down_dims: Channel size for each UNet level.
-          The length of this array determines numebr of levels.
-        kernel_size: Conv kernel size
-        n_groups: Number of groups for GroupNorm
-        """
-
-        super().__init__()
-        all_dims = [input_dim] + list(down_dims)
-        start_dim = down_dims[0]
-
-        dsed = diffusion_step_embed_dim
-        diffusion_step_encoder = nn.Sequential(
-            SinusoidalPosEmb(dsed),
-            nn.Linear(dsed, dsed * 4),
-            nn.Mish(),
-            nn.Linear(dsed * 4, dsed),
-        )
-        cond_dim = dsed + global_cond_dim
-
-        in_out = list(zip(all_dims[:-1], all_dims[1:]))
-        mid_dim = all_dims[-1]
-        self.mid_modules = nn.ModuleList([
-            ConditionalResidualBlock1D(
-                mid_dim, mid_dim, cond_dim=cond_dim,
-                kernel_size=kernel_size, n_groups=n_groups, gnn_data=gnn_data, use_gnn=use_gnn),
-            ConditionalResidualBlock1D(
-                mid_dim, mid_dim, cond_dim=cond_dim,
-                kernel_size=kernel_size, n_groups=n_groups, gnn_data=gnn_data, use_gnn=use_gnn),
-        ])
-
-        down_modules = nn.ModuleList([])
-        for ind, (dim_in, dim_out) in enumerate(in_out):
-            is_last = ind >= (len(in_out) - 1)
-            down_modules.append(nn.ModuleList([
-                ConditionalResidualBlock1D(
-                    dim_in, dim_out, cond_dim=cond_dim,
-                    kernel_size=kernel_size, n_groups=n_groups, gnn_data=gnn_data, use_gnn=use_gnn),
-                ConditionalResidualBlock1D(
-                    dim_out, dim_out, cond_dim=cond_dim,
-                    kernel_size=kernel_size, n_groups=n_groups, gnn_data=gnn_data, use_gnn=use_gnn),
-                Downsample1d(dim_out) if not is_last else nn.Identity()
-            ]))
-
-        up_modules = nn.ModuleList([])
-        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
-            is_last = ind >= (len(in_out) - 1)
-            up_modules.append(nn.ModuleList([
-                ConditionalResidualBlock1D(
-                    dim_out*2, dim_in, cond_dim=cond_dim,
-                    kernel_size=kernel_size, n_groups=n_groups, gnn_data=gnn_data, use_gnn=use_gnn),
-                ConditionalResidualBlock1D(
-                    dim_in, dim_in, cond_dim=cond_dim,
-                    kernel_size=kernel_size, n_groups=n_groups, gnn_data=gnn_data, use_gnn=use_gnn),
-                Upsample1d(dim_in) if not is_last else nn.Identity()
-            ]))
-
-        final_conv = nn.Sequential(
-            Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
-            nn.Conv1d(start_dim, input_dim, 1),
-        )
-
-        self.diffusion_step_encoder = diffusion_step_encoder
-        self.up_modules = up_modules
-        self.down_modules = down_modules
-        self.final_conv = final_conv
-
-        # print("number of parameters: {:e}".format(
-        #     sum(p.numel() for p in self.parameters()))
-        # )
-
-        # make it float
-        self = self.float()
-
-    def forward(self,
-            sample: torch.Tensor,
-            timestep: Union[torch.Tensor, float, int],
-            global_cond=None,
-            x_dict=None,
-            edge_index_dict=None
-            ):
-        """
-        x: (B,T,input_dim)
-        timestep: (B,) or int, diffusion step
-        global_cond: (B,global_cond_dim)
-        output: (B,T,input_dim)
-        """
-        # (B,T,C)
-        sample = sample.moveaxis(-1,-2)
-        # (B,C,T)
-
-        # 1. time
-        timesteps = timestep
-        if not torch.is_tensor(timesteps):
-            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
-            timesteps = torch.tensor([timesteps], dtype=torch.long, device=sample.device)
-        elif torch.is_tensor(timesteps) and len(timesteps.shape) == 0:
-            timesteps = timesteps[None].to(sample.device)
-        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        
-        timesteps = timesteps.expand(sample.shape[0])
-        global_feature = self.diffusion_step_encoder(timesteps)
-
-        if global_cond is not None:
-            global_feature = torch.cat([
-                global_feature, global_cond
-            ], axis=-1)
-
-        x = sample
-        h = []
-        for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
-
-            # print out devices
-            x = resnet(x, global_feature, x_dict, edge_index_dict)
-            x = resnet2(x, global_feature, x_dict, edge_index_dict)
-            h.append(x)
-            x = downsample(x)
-
-        for mid_module in self.mid_modules:
-            x = mid_module(x, global_feature, x_dict, edge_index_dict)
-
-        for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):
-            x = torch.cat((x, h.pop()), dim=1)
-            x = resnet(x, global_feature, x_dict, edge_index_dict)
-            x = resnet2(x, global_feature, x_dict, edge_index_dict)
-            x = upsample(x)
-
-        x = self.final_conv(x)
-
-        # (B,C,T)
-        x = x.moveaxis(-1,-2)
-        # (B,T,C)
-        return x
-
-def network_init(action_dim, obs_dim, obs_horizon, pred_horizon, num_diffusion_iters, dataset_training, use_gnn, device):
+def network_init(action_dim, obs_dim, obs_horizon, num_trajs, num_diffusion_iters, dataset_training, use_gnn, device):
 
     # create network object
     noise_pred_net = ConditionalUnet1D(
@@ -354,7 +51,7 @@ def network_init(action_dim, obs_dim, obs_horizon, pred_horizon, num_diffusion_i
     )
 
     # example inputs
-    noised_action = torch.randn((1, pred_horizon, action_dim)).to(device)
+    noised_action = torch.randn((1, num_trajs, action_dim)).to(device)
     obs = torch.zeros((1, obs_horizon, obs_dim)).to(device)
 
     # example diffusion iteration
@@ -373,7 +70,7 @@ def network_init(action_dim, obs_dim, obs_horizon, pred_horizon, num_diffusion_i
         x_dict=x_dict,
         edge_index_dict=edge_index_dict)
 
-    # for this demo, we use DDPMScheduler with 100 diffusion iterations
+    # for this demo, we use DDPMScheduler
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=num_diffusion_iters,
         # the choise of beta schedule has big impact on performance
@@ -384,6 +81,14 @@ def network_init(action_dim, obs_dim, obs_horizon, pred_horizon, num_diffusion_i
         # our network predicts noise (instead of denoised action)
         prediction_type='epsilon'
     )
+
+    # try DPMSolverMultistepScheduler (not tested yet)
+    # noise_scheduler = DPMSolverMultistepScheduler(
+    #     num_train_timesteps=num_diffusion_iters,  
+    #     beta_schedule='squaredcos_cap_v2',
+    #     # clip_sample=True,
+    #     prediction_type='epsilon'
+    # )
 
     # device transfer
     _ = noise_pred_net.to(device)
@@ -409,12 +114,17 @@ def create_pair_obs_act(dirs, device, **kwargs):
     percentage_test = kwargs.get('percentage_test')
     total_num_demos = max_num_training_demos / percentage_training
 
+    # network type
+    network_type = kwargs.get('network_type')
+
     # loop over dirs
     obs_data = th.tensor([]).to(device)
     traj_data = th.tensor([]).to(device)
 
     # list dirs in dirs
     dirs = [ f.path for f in os.scandir(dirs) if f.is_dir() ]
+
+    idx = 0
     for dir in dirs:
 
         files = os.listdir(dir)
@@ -429,25 +139,36 @@ def create_pair_obs_act(dirs, device, **kwargs):
             # append to the data
             obs_data = th.cat((obs_data, th.from_numpy(obs).float().to(device)), 0)
             traj_data = th.cat((traj_data, th.from_numpy(acts).float().to(device)), 0)
-
-    # print out the total data size
-    print(f"original data size: {obs_data.shape[0] * traj_data.shape[1]}") # obs_data.shape[0] is the num of demos, traj_data.shape[1] is num of trajs per each demo (default is 10)
-
-    # rearanage the data
-    assert obs_data.shape[0] == traj_data.shape[0], "obs_data and traj_data must have the same number of samples"
-    dataset_obs = th.tensor([]).to(device)
-    dataset_acts = th.tensor([]).to(device)
-    idx = 0
-    for i in range(obs_data.shape[0]): # loop over samples
-        for j in range(traj_data.shape[1]): # loop over expert demonstrations (10)
-            dataset_obs = th.cat((dataset_obs, obs_data[i, 0, :].unsqueeze(0).unsqueeze(0)), 0)
-            dataset_acts = th.cat((dataset_acts, traj_data[i, j, :].unsqueeze(0).unsqueeze(0)), 0)
             idx += 1
             if idx >= total_num_demos:
                 break
         else:
             continue
         break
+
+    # print out the total data size
+    # print(f"original data size: {obs_data.shape[0] * traj_data.shape[1]}") # obs_data.shape[0] is the num of demos, traj_data.shape[1] is num of trajs per each demo (default is 10)
+    print(f"original data size: {obs_data.shape[0]}") # obs_data.shape[0] is the num of demos, traj_data.shape[1] is num of trajs per each demo (default is 10)
+
+    # rearanage the data for diffusion model
+    if network_type == 'diffusion':
+        assert obs_data.shape[0] == traj_data.shape[0], "obs_data and traj_data must have the same number of samples"
+        dataset_obs = th.tensor([]).to(device)
+        dataset_acts = th.tensor([]).to(device)
+        idx = 0
+        for i in range(obs_data.shape[0]): # loop over samples
+            for j in range(traj_data.shape[1]): # loop over expert demonstrations (10)
+                dataset_obs = th.cat((dataset_obs, obs_data[i, 0, :].unsqueeze(0).unsqueeze(0)), 0)
+                dataset_acts = th.cat((dataset_acts, traj_data[i, j, :].unsqueeze(0).unsqueeze(0)), 0)
+                idx += 1
+                if idx >= total_num_demos:
+                    break
+            else:
+                continue
+            break
+    else:
+        dataset_obs = obs_data
+        dataset_acts = traj_data
 
     # split the dataset into training, eval, and test
     dataset_obs_training = dataset_obs[0:int(dataset_obs.shape[0]*percentage_training)]
@@ -645,7 +366,7 @@ def create_gnn_dataset(dirs, device, **kwargs):
 
     return dataset_training, dataset_eval, dataset_test
 
-def get_nactions(noise_pred_net, noise_scheduler, dataset, pred_horizon, num_diffusion_iters, action_dim, use_gnn, device, is_visualize=True, num_eval=None):
+def get_nactions(noise_pred_net, noise_scheduler, dataset, num_trajs, num_diffusion_iters, action_dim, use_gnn, device, is_visualize=True, num_eval=None):
 
     """
     This function generates a predicted trajectory
@@ -663,7 +384,8 @@ def get_nactions(noise_pred_net, noise_scheduler, dataset, pred_horizon, num_dif
     # loop over the dataset
     print("start denoising...")
     expert_actions, nactions, nobses, times = [], [], [], []
-    for dataset_idx in tqdm(range(num_data_to_load), desc="data idx"):
+    # for dataset_idx in tqdm(range(num_data_to_load), desc="data idx"):
+    for dataset_idx in range(num_data_to_load):
 
         # stack the last obs_horizon (2) number of observations
         nobs = dataset[dataset_idx].obs if use_gnn else dataset[dataset_idx][0].unsqueeze(0)
@@ -677,7 +399,7 @@ def get_nactions(noise_pred_net, noise_scheduler, dataset, pred_horizon, num_dif
 
             # initialize action from Guassian noise
             noisy_action = torch.randn(
-                (B, pred_horizon, action_dim), device=device)
+                (B, num_trajs, action_dim), device=device)
             naction = noisy_action
 
             # init scheduler
@@ -686,7 +408,8 @@ def get_nactions(noise_pred_net, noise_scheduler, dataset, pred_horizon, num_dif
             # start timer
             start_time = time.time()
 
-            for k in tqdm(noise_scheduler.timesteps, desc="diffusion iter k"):
+            # for k in tqdm(noise_scheduler.timesteps, desc="diffusion iter k"):
+            for k in noise_scheduler.timesteps:
                 # predict noise
 
                 if use_gnn:
@@ -722,68 +445,17 @@ def get_nactions(noise_pred_net, noise_scheduler, dataset, pred_horizon, num_dif
         nactions.append(naction.squeeze(0).cpu().numpy())
         nobses.append(nobs.cpu().numpy())
 
-        # print out the computation time
-        print("computation time: ", np.mean(times))
-
-        # visualize trajectory
         if is_visualize:
-            visualize_trajectory(expert_actions, nactions, nobs, dataset_idx)
+            # print out the computation time
+            print("computation time: ", np.mean(times))
+            # visualize trajectory
+            visualize_trajectory(expert_action.cpu().numpy(), naction.squeeze(0).cpu().numpy(), nobs, dataset_idx)
 
     if not is_visualize: # used get_nactions used in evaluation
         return expert_actions, nactions, nobses
 
-def visualize_trajectory(expert_actions, action_preds, nobs, image_idx):
+def plot_obstacles(start_state, f_obs, ax):
 
-    # get action and observation manager for normalization and denormalization
-    am = ActionManager() # get action manager
-    om = ObservationManager() # get observation manager
-
-    # plot 
-    fig = plt.figure(figsize=(20, 20))
-    ax = fig.add_subplot(211, projection='3d')
-
-    assert len(action_preds) == len(expert_actions), "the number of predicted trajectories and true trajectories should be the same"
-
-    # position trajectory
-    idx = 0
-    for action_pred, expert_action in zip(action_preds, expert_actions):
-
-        pred_traj = am.denormalizeTraj(action_pred)
-        true_traj = am.denormalizeTraj(expert_action)
-
-        # convert the trajectory to a b-spline
-        start_state = getZeroState()
-        w_posBS_pred, w_yawBS_pred = am.f_trajAnd_w_State2wBS(pred_traj, start_state)
-        w_posBS_true, w_yawBS_true = am.f_trajAnd_w_State2wBS(true_traj, start_state)
-        num_vectors_pos = 100
-        num_vectors_yaw = 10
-        time_pred = np.linspace(w_posBS_pred.getT0(), w_posBS_pred.getTf(), num_vectors_pos)
-        time_yaw_pred = np.linspace(w_yawBS_pred.getT0(), w_yawBS_pred.getTf(), num_vectors_yaw)
-        time_true = np.linspace(w_posBS_true.getT0(), w_posBS_true.getTf(), num_vectors_pos)
-        time_yaw_true = np.linspace(w_yawBS_true.getT0(), w_yawBS_true.getTf(), num_vectors_yaw)
-
-        # plot the predicted trajectory
-        if idx == 0:
-            ax.plot(w_posBS_true.pos_bs[0](time_true), w_posBS_true.pos_bs[1](time_true), w_posBS_true.pos_bs[2](time_true), lw=4, alpha=0.7, label='Expert', c='green')
-            ax.plot(w_posBS_pred.pos_bs[0](time_pred), w_posBS_pred.pos_bs[1](time_pred), w_posBS_pred.pos_bs[2](time_pred), lw=4, alpha=0.7, label='GNN', c='orange')
-
-            # plot the start and goal position
-            ax.scatter(w_posBS_true.pos_bs[0](w_posBS_true.getT0()), w_posBS_true.pos_bs[1](w_posBS_true.getT0()), w_posBS_true.pos_bs[2](w_posBS_true.getT0()), s=100, c='pink', marker='o', label='Start')
-
-        else:
-            ax.plot(w_posBS_true.pos_bs[0](time_true), w_posBS_true.pos_bs[1](time_true), w_posBS_true.pos_bs[2](time_true), lw=4, alpha=0.7, c='green')
-            ax.plot(w_posBS_pred.pos_bs[0](time_pred), w_posBS_pred.pos_bs[1](time_pred), w_posBS_pred.pos_bs[2](time_pred), lw=4, alpha=0.7, c='orange')
-
-        idx += 1
-        if idx > len(action_preds):
-            break
-
-    # plot the goal
-    f_obs = om.denormalizeObservation(nobs.to('cpu').numpy())
-    ax.scatter(f_obs[0][7], f_obs[0][8], f_obs[0][9], s=100, c='red', marker='*', label='Goal')
-    
-    # plot the obstacles
-    # get w pos of the obstacles
     w_obs_poses = []
     p0 = start_state.w_pos[0] # careful here: we assume the agent pos is at the origin - as the agent moves we expect the obstacles shift accordingly
     
@@ -830,6 +502,89 @@ def visualize_trajectory(expert_actions, action_preds, nobs, image_idx):
             ax.plot([p6[0], p8[0]], [p6[1], p8[1]], [p6[2], p8[2]], lw=2, alpha=0.7, c='blue')
             ax.plot([p7[0], p8[0]], [p7[1], p8[1]], [p7[2], p8[2]], lw=2, alpha=0.7, c='blue')
 
+def plot_pos(actions, am, ax, label, num_vectors_pos, num_vectors_yaw, start_state):
+
+    # color (expert: green, student: orange)
+    color = 'green' if label == 'Expert' else 'orange'
+
+    for action_idx in range(actions.shape[0]):
+
+        action = actions[action_idx, :].reshape(1, -1)
+        traj = am.denormalizeTraj(action)
+        
+        # convert the trajectory to a b-spline
+        w_posBS, w_yawBS = am.f_trajAnd_w_State2wBS(traj, start_state)
+        time_pos = np.linspace(w_posBS.getT0(), w_posBS.getTf(), num_vectors_pos)
+        time_yaw = np.linspace(w_yawBS.getT0(), w_yawBS.getTf(), num_vectors_yaw)
+
+        # plot the predicted trajectory
+        if action_idx == 0 and label == 'Expert':
+            # plot the start and goal position
+            ax.scatter(w_posBS.pos_bs[0](w_posBS.getT0()), w_posBS.pos_bs[1](w_posBS.getT0()), w_posBS.pos_bs[2](w_posBS.getT0()), s=100, c='pink', marker='o', label='Start')
+        else:
+            label = None
+        
+        # plot trajectory
+        ax.plot(w_posBS.pos_bs[0](time_pos), w_posBS.pos_bs[1](time_pos), w_posBS.pos_bs[2](time_pos), lw=4, alpha=0.7, label=label, c=color)
+        # plot yaw direction
+        ax.quiver(w_posBS.pos_bs[0](time_yaw), w_posBS.pos_bs[1](time_yaw), w_posBS.pos_bs[2](time_yaw), np.cos(w_yawBS.pos_bs[0](time_yaw)), np.sin(w_yawBS.pos_bs[0](time_yaw)), np.zeros_like(w_yawBS.pos_bs[0](time_yaw)), length=0.5, normalize=True, color='red')
+
+        action_idx += 1
+        if action_idx > len(actions):
+            break
+
+def plot_yaw(actions, am, ax, label, num_vectors_yaw, start_state):
+
+    # color (expert: green, student: orange)
+    color = 'green' if label == 'Expert' else 'orange'
+
+    for action_idx in range(actions.shape[0]):
+
+        action = actions[action_idx, :].reshape(1, -1)
+        traj = am.denormalizeTraj(action)
+
+        # convert the trajectory to a b-spline
+        _, w_yawBS = am.f_trajAnd_w_State2wBS(traj, start_state)
+        time_yaw = np.linspace(w_yawBS.getT0(), w_yawBS.getTf(), num_vectors_yaw)
+
+        if not action_idx == 0:
+            label = None
+        else:
+            ax.plot(time_yaw, w_yawBS.pos_bs[0](time_yaw), lw=4, alpha=0.7, label='Diffusion', c=color)
+
+        action_idx += 1
+        if action_idx > len(actions):
+            break
+
+def visualize_trajectory(expert_action, action_pred, nobs, image_idx):
+
+    # interpolation parameters
+    num_vectors_pos = 100
+    num_vectors_yaw = 10
+
+    # get start state
+    start_state = getZeroState() # TODO (hardcoded)
+
+    # get action and observation manager for normalization and denormalization
+    am = ActionManager() # get action manager
+    om = ObservationManager() # get observation manager
+
+    # plot 
+    fig = plt.figure(figsize=(20, 20))
+    ax = fig.add_subplot(211, projection='3d')
+
+    # plot pos trajectories
+    plot_pos(expert_action, am, ax, 'Expert', num_vectors_pos, num_vectors_yaw, start_state)
+    plot_pos(action_pred, am, ax, 'Diffusion', num_vectors_pos, num_vectors_yaw, start_state)
+
+    # plot the goal
+    f_obs = om.denormalizeObservation(nobs.to('cpu').numpy())
+    ax.scatter(f_obs[0][7], f_obs[0][8], f_obs[0][9], s=100, c='red', marker='*', label='Goal')
+    
+    # plot the obstacles
+    # get w pos of the obstacles
+    plot_obstacles(start_state, f_obs, ax)
+
     ax.grid(True)
     ax.legend(loc='best')
     ax.set_xlim(-2, 15)
@@ -843,31 +598,139 @@ def visualize_trajectory(expert_actions, action_preds, nobs, image_idx):
     # plot the yaw trajectory
     ax = fig.add_subplot(212)
 
-    idx = 0
-    for action_pred, expert_action in zip(action_preds, expert_actions):
-
-        pred_traj = am.denormalizeTraj(action_pred)
-        true_traj = am.denormalizeTraj(expert_action)
-
-        # convert the trajectory to a b-spline
-        start_state = getZeroState()
-        w_posBS_pred, w_yawBS_pred = am.f_trajAnd_w_State2wBS(pred_traj, start_state)
-        w_posBS_true, w_yawBS_true = am.f_trajAnd_w_State2wBS(true_traj, start_state)
-
-        if idx == 0:
-            ax.plot(time_yaw_true, w_yawBS_true.pos_bs[0](time_yaw_true), lw=4, alpha=0.7, label='Expert', c='green')
-            ax.plot(time_yaw_pred, w_yawBS_pred.pos_bs[0](time_yaw_pred), lw=4, alpha=0.7, label='Diffusion', c='orange')
-        else:
-            ax.plot(time_yaw_true, w_yawBS_true.pos_bs[0](time_yaw_true), lw=4, alpha=0.7, c='green')
-            ax.plot(time_yaw_pred, w_yawBS_pred.pos_bs[0](time_yaw_pred), lw=4, alpha=0.7, c='orange')
-
-        idx += 1
-        if idx > len(action_preds):
-            break
+    # plot yaw trajectories
+    plot_yaw(expert_action, am, ax, 'Expert', num_vectors_yaw, start_state)
+    plot_yaw(action_pred, am, ax, 'Diffusion', num_vectors_yaw, start_state)
 
     ax.grid(True)
     ax.legend(loc='best')
     ax.set_xlabel('Time')
     ax.set_ylabel('Yaw')
-    fig.savefig(f'/media/jtorde/T7/gdp/pngs/image_{image_idx}.png')
-    # plt.show()
+    # fig.savefig(f'/media/jtorde/T7/gdp/pngs/image_{image_idx}.png')
+    plt.show()
+
+def calculate_deep_panther_loss(batch, policy, yaw_loss_weight, is_lstm=False):
+    """Calculate the supervised learning loss used to train the behavioral clone.
+
+    Args:
+        obs: The observations seen by the expert. If this is a Tensor, then
+            gradients are detached first before loss is calculated.
+        acts: The actions taken by the expert. If this is a Tensor, then its
+            gradients are detached first before loss is calculated.
+
+    Returns:
+        loss: The supervised learning loss for the behavioral clone to optimize.
+        stats_dict: Statistics about the learning process to be logged.
+
+    """
+
+    # get the observation and action
+    
+    obs = batch[0]
+    acts = batch[1]
+
+    # (TODO hardcoded)
+    traj_size_pos_ctrl_pts = 15
+    traj_size_yaw_ctrl_pts = 6
+
+    # set policy to train mode
+    policy.train()
+
+    # get the predicted action
+
+    if is_lstm:
+        # TODO: length of the sequence is hardcoded
+        length_of_sequence = 1
+        obs = th.reshape(obs, (obs.shape[0], length_of_sequence, obs.shape[1])) # (batch_size, sequence_length, hidden_size)
+        pred_acts = policy(obs)
+    else:
+
+        print("obs shape: ", obs.shape)
+        pred_acts = policy(obs)
+        print("pred_acts shape: ", pred_acts.shape)
+
+    # get size 
+    num_of_traj_per_action=list(acts.shape)[1] #acts.shape is [batch size, num_traj_action, size_traj]
+    batch_size=list(acts.shape)[0] #acts.shape is [batch size, num_of_traj_per_action, size_traj]
+
+    # initialize the distance matrix
+    distance_matrix= th.zeros(batch_size, num_of_traj_per_action, num_of_traj_per_action)
+    distance_pos_matrix= th.zeros(batch_size, num_of_traj_per_action, num_of_traj_per_action) 
+    distance_yaw_matrix= th.zeros(batch_size, num_of_traj_per_action, num_of_traj_per_action) 
+    distance_time_matrix= th.zeros(batch_size, num_of_traj_per_action, num_of_traj_per_action)
+    distance_pos_matrix_within_expert= th.zeros(batch_size, num_of_traj_per_action, num_of_traj_per_action)
+
+    #Expert --> i
+    #Student --> j
+    for i in range(num_of_traj_per_action):
+        for j in range(num_of_traj_per_action):
+
+            expert_i=       acts[:,i,:].float(); #All the elements
+            student_j=      pred_acts[:,j,:].float() #All the elements
+
+            expert_pos_i=   acts[:,i,0:traj_size_pos_ctrl_pts].float()
+            student_pos_j=  pred_acts[:,j,0:traj_size_pos_ctrl_pts].float()
+
+            expert_yaw_i=   acts[:,i,traj_size_pos_ctrl_pts:(traj_size_pos_ctrl_pts+traj_size_yaw_ctrl_pts)].float()
+            student_yaw_j=  pred_acts[:,j,traj_size_pos_ctrl_pts:(traj_size_pos_ctrl_pts+traj_size_yaw_ctrl_pts)].float()
+
+            expert_time_i=       acts[:,i,-1:].float(); #Time. Note: Is you use only -1 (instead of -1:), then distance_time_matrix will have required_grad to false
+            student_time_j=      pred_acts[:,j,-1:].float() #Time. Note: Is you use only -1 (instead of -1:), then distance_time_matrix will have required_grad to false
+
+            distance_matrix[:,i,j]=th.mean(th.nn.MSELoss(reduction='none')(expert_i, student_j), dim=1)
+            distance_pos_matrix[:,i,j]=th.mean(th.nn.MSELoss(reduction='none')(expert_pos_i, student_pos_j), dim=1)
+            distance_yaw_matrix[:,i,j]=th.mean(th.nn.MSELoss(reduction='none')(expert_yaw_i, student_yaw_j), dim=1)
+            distance_time_matrix[:,i,j]=th.mean(th.nn.MSELoss(reduction='none')(expert_time_i, student_time_j), dim=1)
+
+            #This is simply to delete the trajs from the expert that are repeated
+            expert_pos_j=   acts[:,j,0:traj_size_pos_ctrl_pts].float()
+            distance_pos_matrix_within_expert[:,i,j]=th.mean(th.nn.MSELoss(reduction='none')(expert_pos_i, expert_pos_j), dim=1)
+
+    is_repeated=th.zeros(batch_size, num_of_traj_per_action, dtype=th.bool)
+
+    for i in range(num_of_traj_per_action):
+        for j in range(i+1, num_of_traj_per_action):
+            is_repeated[:,j]=th.logical_or(is_repeated[:,j], th.lt(distance_pos_matrix_within_expert[:,i,j], 1e-7))
+
+    assert distance_matrix.requires_grad==True
+    assert distance_pos_matrix.requires_grad==True
+    assert distance_yaw_matrix.requires_grad==True
+    assert distance_time_matrix.requires_grad==True
+
+    #Option 1: Solve assignment problem
+    A_matrix=th.zeros(batch_size, num_of_traj_per_action, num_of_traj_per_action)
+
+    for index_batch in range(batch_size):         
+
+        cost_matrix=distance_pos_matrix[index_batch,:,:]
+        map2RealRows=np.array(range(num_of_traj_per_action))
+        map2RealCols=np.array(range(num_of_traj_per_action))
+
+        rows_to_delete=[]
+        for i in range(num_of_traj_per_action): #for each row (expert traj)
+            if(is_repeated[index_batch,i]==True): 
+                rows_to_delete.append(i) #Delete that row
+
+        cost_matrix=cost_matrix[is_repeated[index_batch,:]==False]   #np.delete(cost_matrix_numpy, rows_to_delete, axis=0)
+        cost_matrix_numpy=cost_matrix.cpu().detach().numpy()
+
+        # Solve assignment problem                                       
+        row_indexes, col_indexes = linear_sum_assignment(cost_matrix_numpy)
+        for row_index, col_index in zip(row_indexes, col_indexes):
+            A_matrix[index_batch, map2RealRows[row_index], map2RealCols[col_index]]=1
+            
+    num_nonzero_A=th.count_nonzero(A_matrix); #This is the same as the number of distinct trajectories produced by the expert
+
+    pos_loss=th.sum(A_matrix*distance_pos_matrix)/num_nonzero_A
+    yaw_loss=th.sum(A_matrix*distance_yaw_matrix)/num_nonzero_A
+    time_loss=th.sum(A_matrix*distance_time_matrix)/num_nonzero_A
+
+    assert (distance_matrix.shape)[0]==batch_size, "Wrong shape!"
+    assert (distance_matrix.shape)[1]==num_of_traj_per_action, "Wrong shape!"
+    assert pos_loss.requires_grad==True
+    assert yaw_loss.requires_grad==True
+    assert time_loss.requires_grad==True
+
+    loss = time_loss + pos_loss + yaw_loss_weight*yaw_loss
+
+    return loss
