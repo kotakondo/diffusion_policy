@@ -3,6 +3,7 @@
 # diffusion policy import
 import numpy as np
 import torch as th
+import os
 import torch.nn as nn
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
@@ -174,6 +175,8 @@ def train_loop_diffusion_model(policy, optimizer, lr_scheduler, noise_scheduler,
     save_dir = kwargs['save_dir']
     dataset_eval = kwargs['datasets_loader']['dataset_eval']
     dataset_training = kwargs['datasets_loader']['dataset_training']
+    en_network_type = kwargs['en_network_type']
+    de_network_type = kwargs['de_network_type']
 
     # set policy to train mode
     policy.train()
@@ -249,7 +252,8 @@ def train_loop_diffusion_model(policy, optimizer, lr_scheduler, noise_scheduler,
                     wandb.log({'loss': loss, 'epoch': epoch_idx})
 
                 # save model
-                th.save(policy.state_dict(), f'{save_dir}/diffusion_num_{epoch_counter}.pth')
+                filename = f'{save_dir}/{en_network_type}_{de_network_type}_num_{epoch_counter}.pth'
+                th.save(policy.state_dict(), filename)
                 epoch_counter += 1
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
@@ -299,6 +303,8 @@ def train_diffusion_model(policy, noise_scheduler, **kwargs):
     num_epochs = kwargs['num_epochs']
     save_dir = kwargs['save_dir']
     use_gnn = kwargs['en_network_type'] == 'gnn'
+    en_network_type = kwargs['en_network_type']
+    de_network_type = kwargs['de_network_type']
 
     # Exponential Moving Average
     # accelerates training and improves stability
@@ -329,7 +335,7 @@ def train_diffusion_model(policy, noise_scheduler, **kwargs):
     ema.copy_to(policy.parameters())
 
     # save model
-    filename = f'{save_dir}/diffusion_model_final.pth' if not use_gnn else f'{save_dir}/gnn_diffusion_model_final.pth'
+    filename = f'{save_dir}/{en_network_type}_{de_network_type}_final.pth'
     th.save(policy.state_dict(), filename)
 
     return policy
@@ -347,6 +353,7 @@ def train_loop_non_diffusion_model(policy, optimizer, lr_scheduler, **kwargs):
     save_dir = kwargs['save_dir']
     num_eval = kwargs['num_eval']
     en_network_type = kwargs['en_network_type']
+    de_network_type = kwargs['de_network_type']
 
     # training loop
     wandb.init(project=en_network_type)
@@ -377,7 +384,8 @@ def train_loop_non_diffusion_model(policy, optimizer, lr_scheduler, **kwargs):
                     wandb.log({'loss': loss, 'epoch': epoch_idx})
 
                 # save model
-                th.save(policy.state_dict(), f'{save_dir}/mlp_num_{epoch_counter}.pth')
+                filename = f'{save_dir}/{en_network_type}_{de_network_type}_num_{epoch_counter}.pth'
+                th.save(policy.state_dict(), filename)
                 epoch_counter += 1
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
@@ -429,6 +437,7 @@ def train_non_diffusion_model(policy, **kwargs):
     dataloader_training = kwargs['datasets_loader']['dataloader_training']
     save_dir = kwargs['save_dir']
     en_network_type = kwargs['en_network_type']
+    de_network_type = kwargs['de_network_type']
 
     # Standard ADAM optimizer
     # Note that EMA parametesr are not optimized
@@ -448,7 +457,7 @@ def train_non_diffusion_model(policy, **kwargs):
     policy = train_loop_non_diffusion_model(policy, optimizer, lr_scheduler, **kwargs)
 
     # save model
-    filename = f'{save_dir}/{en_network_type}_final.pth'
+    filename = f'{save_dir}/{en_network_type}_{de_network_type}_final.pth'
     th.save(policy.state_dict(), filename)
 
     return policy
