@@ -7,11 +7,12 @@ import time
 import numpy as np
 import argparse
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from diffusers import DPMSolverMultistepScheduler
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 
 # torch import
 import torch as th
-from torch.utils.data import TensorDataset
+from torch.utils.data import Dataset
 
 # gnn import
 from torch_geometric.data import HeteroData
@@ -25,6 +26,21 @@ from scipy.optimize import linear_sum_assignment
 
 # network utils import
 from network_utils import ConditionalUnet1D
+
+# dataset for dictornary
+
+class DictDataset(Dataset):
+
+    def __init__(self, obs, acts):
+        self.obs = obs
+        self.acts = acts
+        
+    def __getitem__(self, index):
+        return {'obs': self.obs[index], 'acts': self.acts[index]}
+    
+    def __len__(self):
+        return len(self.obs)
+
 
 def str2bool(v):
     """
@@ -40,19 +56,29 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
-def network_init(action_dim, obs_dim, obs_horizon, num_trajs, num_diffusion_iters, dataset_training, use_gnn, device):
+def setup_diffusion(**kwargs):
+
+    # unpack kwargs
+    action_dim = kwargs.get('action_dim')
+    obs_dim = kwargs.get('obs_dim')
+    obs_horizon = kwargs.get('obs_horizon')
+    num_trajs = kwargs.get('num_trajs')
+    num_diffusion_iters = kwargs.get('num_diffusion_iters')
+    en_network_type = kwargs.get('en_network_type')
+    use_gnn = en_network_type == 'gnn'
+    device = kwargs.get('device')
+    scheduler_type = kwargs.get('scheduler_type')
+    dataset = kwargs['datasets_loader']['dataset_training']
 
     # create network object
-    noise_pred_net = ConditionalUnet1D(
-        input_dim=action_dim,
-        global_cond_dim=obs_dim*obs_horizon,
-        gnn_data=dataset_training[0] if use_gnn else None,
-        use_gnn=use_gnn,
-    )
+    policy = ConditionalUnet1D(**kwargs)
 
     # example inputs
     noised_action = torch.randn((1, num_trajs, action_dim)).to(device)
     obs = torch.zeros((1, obs_horizon, obs_dim)).to(device)
+
+    # naction's num_trajs needs to be a multiple of 2 so let's make it 8 for now
+    # noised_action = noised_action[:, :8, :] # (B, num_trajs, action_dim)
 
     # example diffusion iteration
     diffusion_iter = torch.zeros((1,)).to(device)
@@ -60,10 +86,11 @@ def network_init(action_dim, obs_dim, obs_horizon, num_trajs, num_diffusion_iter
     # the noise prediction network
     # takes noisy action, diffusion iteration and observation as input
     # predicts the noise added to action
-    # you need to run noise_pred_net to initialize the network https://stackoverflow.com/questions/75550160/how-to-set-requires-grad-to-false-freeze-pytorch-lazy-layers
-    x_dict = dataset_training[0].x_dict if use_gnn else None
-    edge_index_dict = dataset_training[0].edge_index_dict if use_gnn else None
-    noise = noise_pred_net(
+    # you need to run policy to initialize the network https://stackoverflow.com/questions/75550160/how-to-set-requires-grad-to-false-freeze-pytorch-lazy-layers
+    x_dict = dataset[0].x_dict if use_gnn else None
+    edge_index_dict = dataset[0].edge_index_dict if use_gnn else None
+
+    _ = policy(
         sample=noised_action,
         timestep=diffusion_iter,
         global_cond=obs.flatten(start_dim=1),
@@ -71,39 +98,48 @@ def network_init(action_dim, obs_dim, obs_horizon, num_trajs, num_diffusion_iter
         edge_index_dict=edge_index_dict)
 
     # for this demo, we use DDPMScheduler
-    noise_scheduler = DDPMScheduler(
-        num_train_timesteps=num_diffusion_iters,
-        # the choise of beta schedule has big impact on performance
-        # we found squared cosine works the best
-        beta_schedule='squaredcos_cap_v2',
-        # clip output to [-1,1] to improve stability
-        clip_sample=True,
-        # our network predicts noise (instead of denoised action)
-        prediction_type='epsilon'
-    )
-
-    # try DPMSolverMultistepScheduler (not tested yet)
-    # noise_scheduler = DPMSolverMultistepScheduler(
-    #     num_train_timesteps=num_diffusion_iters,  
-    #     beta_schedule='squaredcos_cap_v2',
-    #     # clip_sample=True,
-    #     prediction_type='epsilon'
-    # )
+    if scheduler_type == 'ddpm':
+        noise_scheduler = DDPMScheduler(
+            num_train_timesteps=num_diffusion_iters,
+            # the choise of beta schedule has big impact on performance
+            # we found squared cosine works the best
+            beta_schedule='squaredcos_cap_v2',
+            # clip output to [-1,1] to improve stability
+            clip_sample=True,
+            # our network predicts noise (instead of denoised action)
+            prediction_type='epsilon'
+        )
+    elif scheduler_type == 'ddim':
+        noise_scheduler = DDIMScheduler(
+            num_train_timesteps=num_diffusion_iters,
+            # the choise of beta schedule has big impact on performance
+            # we found squared cosine works the best
+            beta_schedule='squaredcos_cap_v2',
+            # clip output to [-1,1] to improve stability
+            clip_sample=True,
+            # our network predicts noise (instead of denoised action)
+            prediction_type='epsilon'
+        )
+    elif scheduler_type == 'dpm-multistep':
+        # DPMSolverMultistepScheduler
+        noise_scheduler = DPMSolverMultistepScheduler(
+            num_train_timesteps=num_diffusion_iters,  
+            beta_schedule='squaredcos_cap_v2',
+            # clip_sample=True,
+            prediction_type='epsilon'
+        )
 
     # device transfer
-    _ = noise_pred_net.to(device)
+    _ = policy.to(device)
 
-    return noise_pred_net, noise_scheduler
+    return policy, noise_scheduler
 
-
-def create_pair_obs_act(dirs, device, **kwargs):
+def create_pair_obs_act(**kwargs):
 
     """
     Create dataset from npz files in dirs
     
-    @param dirs: directory containing npz files
-    @param device: device to transfer data to
-    @param: kwargs: max_num_training_demos, percentage_training, percentage_eval, percentage_test
+    @param: kwargs: max_num_training_demos, percentage_training, percentage_eval, percentage_test, data_dir, device, obs_type
     @return dataset: TensorDataset
     """
 
@@ -113,33 +149,50 @@ def create_pair_obs_act(dirs, device, **kwargs):
     percentage_eval = kwargs.get('percentage_eval')
     percentage_test = kwargs.get('percentage_test')
     total_num_demos = max_num_training_demos / percentage_training
+    data_dir = kwargs.get('data_dir')
+    device = kwargs.get('device')
+    obs_type = kwargs.get('obs_type')
+    en_network_type = kwargs.get('en_network_type')
+    num_trajs = kwargs.get('num_trajs')
 
-    # network type
-    network_type = kwargs.get('network_type')
-
-    # loop over dirs
-    obs_data = th.tensor([]).to(device)
-    traj_data = th.tensor([]).to(device)
+    # initialize dataset
+    obs_data = {}
+    traj_data = {}
 
     # list dirs in dirs
-    dirs = [ f.path for f in os.scandir(dirs) if f.is_dir() ]
+    dirs = [ f.path for f in os.scandir(data_dir) if f.is_dir() ]
 
+    # loop over dirs
     idx = 0
-    for dir in dirs:
+    for dir in dirs: # round-### directories
 
-        files = os.listdir(dir)
-        files = [dir + '/' + file for file in files if file.endswith('.npz')]
-
+        # get all the npz files in the dir
+        files = [dir + '/' + file for file in os.listdir(dir) if file.endswith('.npz')]
+        
+        # loop over files
         for file in files:
             
-            data = np.load(file) # load data
-            obs = data['obs'][:-1] # remove the last observation (since it is the observation of the goal state)
+            # load data
+            data = np.load(file)
+            obs = data['obs'][:-1] # remove the last observation (since it is the latest observation and we don't have the action for it)
             acts = data['acts'] # actions
 
             # append to the data
-            obs_data = th.cat((obs_data, th.from_numpy(obs).float().to(device)), 0)
-            traj_data = th.cat((traj_data, th.from_numpy(acts).float().to(device)), 0)
-            idx += 1
+            if obs_type == 'last' or en_network_type == 'gnn': # use the last observation 
+                
+                # one observation and one action
+                for i in range(obs.shape[0]):
+                    
+                    obs_data[idx] = th.from_numpy(obs[i, :, :]).float().to(device) #(num_pairs, 1, obs_dim)
+                    traj_data[idx] = th.from_numpy(acts[i, :num_trajs, :]).float().to(device) #(num_pairs, num_trajs, action_dim)
+                    idx += 1
+
+            elif obs_type == 'history': # use the history of observation
+                
+                obs_data[idx] = th.from_numpy(obs).float().to(device) #(num_pairs, obs_horizon, obs_dim)
+                traj_data[idx] = th.from_numpy(acts).float().to(device) #(num_pairs, num_trajs, action_dim)
+                idx += 1
+
             if idx >= total_num_demos:
                 break
         else:
@@ -147,61 +200,49 @@ def create_pair_obs_act(dirs, device, **kwargs):
         break
 
     # print out the total data size
-    # print(f"original data size: {obs_data.shape[0] * traj_data.shape[1]}") # obs_data.shape[0] is the num of demos, traj_data.shape[1] is num of trajs per each demo (default is 10)
-    print(f"original data size: {obs_data.shape[0]}") # obs_data.shape[0] is the num of demos, traj_data.shape[1] is num of trajs per each demo (default is 10)
+    print(f"data size: {len(obs_data.keys())}")
 
-    # rearanage the data for diffusion model
-    if network_type == 'diffusion':
-        assert obs_data.shape[0] == traj_data.shape[0], "obs_data and traj_data must have the same number of samples"
-        dataset_obs = th.tensor([]).to(device)
-        dataset_acts = th.tensor([]).to(device)
-        idx = 0
-        for i in range(obs_data.shape[0]): # loop over samples
-            for j in range(traj_data.shape[1]): # loop over expert demonstrations (10)
-                dataset_obs = th.cat((dataset_obs, obs_data[i, 0, :].unsqueeze(0).unsqueeze(0)), 0)
-                dataset_acts = th.cat((dataset_acts, traj_data[i, j, :].unsqueeze(0).unsqueeze(0)), 0)
-                idx += 1
-                if idx >= total_num_demos:
-                    break
-            else:
-                continue
-            break
-    else:
-        dataset_obs = obs_data
-        dataset_acts = traj_data
+    # split the dataset dictionary into training, eval, and test
+    dataset_obs_training, dataset_acts_training, dataset_obs_eval, dataset_acts_eval, dataset_obs_test, dataset_acts_test =  {}, {}, {}, {}, {}, {}
+    for idx, key in enumerate(obs_data.keys()):
+        if idx < percentage_training * len(obs_data.keys()):
+            dataset_obs_training[key] = obs_data[key]
+            dataset_acts_training[key] = traj_data[key]
+        elif idx < (percentage_training + percentage_eval) * len(obs_data.keys()):
+            dataset_obs_eval[key] = obs_data[key]
+            dataset_acts_eval[key] = traj_data[key]
+        else:
+            dataset_obs_test[key] = obs_data[key]
+            dataset_acts_test[key] = traj_data[key]
 
-    # split the dataset into training, eval, and test
-    dataset_obs_training = dataset_obs[0:int(dataset_obs.shape[0]*percentage_training)]
-    dataset_acts_training = dataset_acts[0:int(dataset_acts.shape[0]*percentage_training)]
-    dataset_obs_eval = dataset_obs[int(dataset_obs.shape[0]*percentage_training):int(dataset_obs.shape[0]*(percentage_training+percentage_eval))]
-    dataset_acts_eval = dataset_acts[int(dataset_acts.shape[0]*percentage_training):int(dataset_acts.shape[0]*(percentage_training+percentage_eval))]
-    dataset_obs_test = dataset_obs[int(dataset_obs.shape[0]*(percentage_training+percentage_eval)):]
-    dataset_acts_test = dataset_acts[int(dataset_acts.shape[0]*(percentage_training+percentage_eval)):]
+    # dataset_obs_eval[key] should start at 0
+    first_key_obs_eval = list(dataset_obs_eval.keys())[0]
+    first_key_acts_eval = list(dataset_acts_eval.keys())[0]
+    dataset_obs_eval = {key - first_key_obs_eval: dataset_obs_eval[key] for key in dataset_obs_eval.keys()}
+    dataset_acts_eval = {key - first_key_acts_eval: dataset_acts_eval[key] for key in dataset_acts_eval.keys()}
 
-    # resize the dataset
-    dataset_obs_training = dataset_obs_training.squeeze(1)
-    dataset_acts_training = dataset_acts_training.squeeze(1)
-    dataset_obs_eval = dataset_obs_eval.squeeze(1)
-    dataset_acts_eval = dataset_acts_eval.squeeze(1)
-    dataset_obs_test = dataset_obs_test.squeeze(1)
-    dataset_acts_test = dataset_acts_test.squeeze(1)
-
-    # print out the dataset size
-    print(f"dataset after rearranging: training data size: {dataset_obs_training.shape[0]}")
+    # dataset_obs_test[key] should start at 0
+    first_key_obs_test = list(dataset_obs_test.keys())[0]
+    first_key_acts_test = list(dataset_acts_test.keys())[0]
+    dataset_obs_test = {key - first_key_obs_test: dataset_obs_test[key] for key in dataset_obs_test.keys()}
+    dataset_acts_test = {key - first_key_acts_test: dataset_acts_test[key] for key in dataset_acts_test.keys()}
 
     return dataset_obs_training, dataset_acts_training, dataset_obs_eval, dataset_acts_eval, dataset_obs_test, dataset_acts_test
 
-def create_gnn_dataset_from_obs_and_acts(dataset_obs, dataset_acts, device):
+def create_gnn_dataset_from_obs_and_acts(dataset_obs, dataset_acts):
 
     """
     This function generates a dataset for GNN
     """
 
+    # initialize dataset
     dataset = []
 
+    # check if the length of dataset_obs and dataset_acts are the same
     assert dataset_obs.shape[0] == dataset_acts.shape[0], "the length of dataset_obs and dataset_acts should be the same"
 
-    for i in range(dataset_obs.shape[0]):
+    # loop over the dataset
+    for data_obs, data_acts in zip(dataset_obs, dataset_acts):
 
         " ********************* GET NODES ********************* "
 
@@ -219,15 +260,11 @@ def create_gnn_dataset_from_obs_and_acts(dataset_obs, dataset_acts, device):
 
         # add nodes
         # get num of obst
-        num_of_obst = int(len(dataset_obs[i][10:])/33)
+        num_of_obst = int(len(data_obs[10:])/33)
 
-        # if type(dataset_obs[i]) is np.ndarray:
-        #     warnings.warn("f_obs_n is a numpy array - converting it to a torch tensor")
-        #     dataset_obs[i] = th.tensor(dataset_obs[i], dtype=th.double).to(device)
-
-        feature_vector_for_current_state = dataset_obs[i][0:7]
-        feature_vector_for_goal = dataset_obs[i][7:10]
-        feature_vector_for_obs = dataset_obs[i][10:]
+        feature_vector_for_current_state = data_obs[0:7]
+        feature_vector_for_goal = data_obs[7:10]
+        feature_vector_for_obs = data_obs[10:]
 
         dist_current_state_goal = np.linalg.norm(feature_vector_for_goal[:3].to('cpu').numpy())
 
@@ -247,9 +284,9 @@ def create_gnn_dataset_from_obs_and_acts(dataset_obs, dataset_acts, device):
         " ********************* MAKE A DATA OBJECT FOR HETEROGENEUS GRAPH ********************* "
 
         # add nodes
-        data["current_state"].x = feature_vector_for_current_state.unsqueeze(0).float().to(device)
-        data["goal_state"].x = feature_vector_for_goal.unsqueeze(0).float().to(device)
-        data["observation"].x = th.stack([feature_vector_for_obs[33*j:33*(j+1)] for j in range(num_of_obst)], dim=0).float().to(device)
+        data["current_state"].x = feature_vector_for_current_state.unsqueeze(0).float()
+        data["goal_state"].x = feature_vector_for_goal.unsqueeze(0).float()
+        data["observation"].x = th.stack([feature_vector_for_obs[33*j:33*(j+1)] for j in range(num_of_obst)], dim=0).float()
 
         # add edges
         if num_of_obst == 2:
@@ -315,13 +352,11 @@ def create_gnn_dataset_from_obs_and_acts(dataset_obs, dataset_acts, device):
         data["goal_state", "dist_goal_to_obs", "observation"].edge_attr = dist_goal_obs
 
         # add ground truth trajectory
-        data.acts = dataset_acts[i].unsqueeze(0).float().to(device)
+        data.acts = data_acts.unsqueeze(0)
         
         # add observation
-        data.obs = dataset_obs[i].unsqueeze(0).float().to(device)
+        data.obs = data_obs.unsqueeze(0).unsqueeze(0)
 
-        # convert the data to the device
-        data = data.to(device)
         # append data to the dataset
         dataset.append(data)
 
@@ -329,57 +364,60 @@ def create_gnn_dataset_from_obs_and_acts(dataset_obs, dataset_acts, device):
 
     return dataset
 
-def create_dataset(dirs, device, **kwargs):
+def create_dataset(**kwargs):
     
     """
     Create dataset from npz files in dirs
     @param dirs: directory containing npz files
     @param device: device to transfer data to
-    @return dataset: TensorDataset
+    @return dataset: DictDataset
     """
-    
+
+    # unpack kwargs
+    en_network_type = kwargs.get('en_network_type')
+
     # get obs and acts
-    dataset_obs_training, dataset_acts_training, dataset_obs_eval, dataset_acts_eval, dataset_obs_test, dataset_acts_test = create_pair_obs_act(dirs, device, **kwargs)
+    dataset_obs_training, dataset_acts_training, dataset_obs_eval, dataset_acts_eval, dataset_obs_test, dataset_acts_test = create_pair_obs_act(**kwargs)
+
+    if en_network_type == 'gnn':
+
+        # conver the dataset from dict to tensor (we only support last observation for now)
+        dataset_obs_training = th.stack(list(dataset_obs_training.values()), dim=0).squeeze(1)
+        dataset_acts_training = th.stack(list(dataset_acts_training.values()), dim=0).squeeze(1)
+        dataset_obs_eval = th.stack(list(dataset_obs_eval.values()), dim=0).squeeze(1)
+        dataset_acts_eval = th.stack(list(dataset_acts_eval.values()), dim=0).squeeze(1)
+        dataset_obs_test = th.stack(list(dataset_obs_test.values()), dim=0).squeeze(1)
+        dataset_acts_test = th.stack(list(dataset_acts_test.values()), dim=0).squeeze(1)
 
     # create dataset
-    dataset_training = TensorDataset(dataset_obs_training, dataset_acts_training)
-    dataset_eval = TensorDataset(dataset_obs_eval, dataset_acts_eval)
-    dataset_test = TensorDataset(dataset_obs_test, dataset_acts_test)
+    dataset_training = create_gnn_dataset_from_obs_and_acts(dataset_obs_training, dataset_acts_training) if en_network_type == 'gnn' else DictDataset(dataset_obs_training, dataset_acts_training)
+    dataset_eval = create_gnn_dataset_from_obs_and_acts(dataset_obs_eval, dataset_acts_eval) if en_network_type == 'gnn' else DictDataset(dataset_obs_eval, dataset_acts_eval)
+    dataset_test = create_gnn_dataset_from_obs_and_acts(dataset_obs_test, dataset_acts_test) if en_network_type == 'gnn' else DictDataset(dataset_obs_test, dataset_acts_test)
 
     return dataset_training, dataset_eval, dataset_test
 
-def create_gnn_dataset(dirs, device, **kwargs):
-
-    """
-    This function generates a dataset for GNN
-    """
-
-    " ********************* GET DATA ********************* "
-
-    # get obs and acts
-    dataset_obs_training, dataset_acts_training, dataset_obs_eval, dataset_acts_eval, dataset_obs_test, dataset_acts_test = create_pair_obs_act(dirs, device, **kwargs)
-
-    # create dataset
-    dataset_training = create_gnn_dataset_from_obs_and_acts(dataset_obs_training, dataset_acts_training, device)
-    dataset_eval = create_gnn_dataset_from_obs_and_acts(dataset_obs_eval, dataset_acts_eval, device)
-    dataset_test = create_gnn_dataset_from_obs_and_acts(dataset_obs_test, dataset_acts_test, device)
-
-    return dataset_training, dataset_eval, dataset_test
-
-def get_nactions(noise_pred_net, noise_scheduler, dataset, num_trajs, num_diffusion_iters, action_dim, use_gnn, device, is_visualize=True, num_eval=None):
+def get_nactions(policy, noise_scheduler, dataset, is_visualize=False, **kwargs):
 
     """
     This function generates a predicted trajectory
     """
 
+    # unpack kwargs
+    num_trajs = kwargs.get('num_trajs')
+    num_diffusion_iters = kwargs.get('num_diffusion_iters')
+    action_dim = kwargs.get('action_dim')
+    use_gnn = kwargs.get('en_network_type') == 'gnn'
+    device = kwargs.get('device')
+    num_eval = kwargs.get('num_eval')
+
     # set model to evaluation mode
-    noise_pred_net.eval()
+    policy.eval()
 
     # set batch size to 1
     B = 1
 
     # num of data to load
-    num_data_to_load = len(dataset) if num_eval is None else num_eval
+    num_data_to_load = min(len(dataset), num_eval)
 
     # loop over the dataset
     print("start denoising...")
@@ -388,8 +426,8 @@ def get_nactions(noise_pred_net, noise_scheduler, dataset, num_trajs, num_diffus
     for dataset_idx in range(num_data_to_load):
 
         # stack the last obs_horizon (2) number of observations
-        nobs = dataset[dataset_idx].obs if use_gnn else dataset[dataset_idx][0].unsqueeze(0)
-        expert_action = dataset[dataset_idx].acts if use_gnn else dataset[dataset_idx][1].unsqueeze(0)
+        nobs = dataset[dataset_idx].obs if use_gnn else dataset[dataset_idx]['obs'] # (B, global_cond_dim)
+        expert_action = dataset[dataset_idx].acts if use_gnn else dataset[dataset_idx]['acts'].unsqueeze(0) # (B, num_trajs, action_dim)
 
         # infer action
         with torch.no_grad():
@@ -415,7 +453,7 @@ def get_nactions(noise_pred_net, noise_scheduler, dataset, num_trajs, num_diffus
                 if use_gnn:
                     x_dict = dataset[dataset_idx].x_dict
                     edge_index_dict = dataset[dataset_idx].edge_index_dict
-                    noise_pred = noise_pred_net(
+                    noise_pred = policy(
                         sample=naction,
                         timestep=k,
                         global_cond=obs_cond,
@@ -423,7 +461,7 @@ def get_nactions(noise_pred_net, noise_scheduler, dataset, num_trajs, num_diffus
                         edge_index_dict=edge_index_dict
                     )
                 else:
-                    noise_pred = noise_pred_net(
+                    noise_pred = policy(
                         sample=naction,
                         timestep=k,
                         global_cond=obs_cond
@@ -609,7 +647,28 @@ def visualize_trajectory(expert_action, action_pred, nobs, image_idx):
     # fig.savefig(f'/media/jtorde/T7/gdp/pngs/image_{image_idx}.png')
     plt.show()
 
-def calculate_deep_panther_loss(batch, policy, yaw_loss_weight, is_lstm=False):
+def visualize(save_dir, use_gnn, device, num_eval, pred_horizon, num_diffusion_iters, action_dim, noise_pred_net, noise_scheduler, dataset):
+
+    """ ********************* VISUALIZATION ********************* """
+
+    # load model
+    dir = str(save_dir)
+    # get the latest model in the directory
+    files = os.listdir(dir)
+    files = [dir + '/' + file for file in files if file.endswith('.pth')]
+    files.sort(key=os.path.getmtime)
+    model_path = files[-1]
+    print("model_path: ", model_path)
+    model = th.load(model_path, map_location=device)
+    noise_pred_net.load_state_dict(model)
+
+    # choose random num_eval dataset
+    dataset = th.utils.data.Subset(dataset, th.randperm(len(dataset))[:num_eval])
+
+    # get expert actions and predicted actions(nactions)
+    get_nactions(noise_pred_net, noise_scheduler, dataset, pred_horizon, num_diffusion_iters, action_dim, use_gnn, device, is_visualize=True, num_eval=10)
+
+def calculate_deep_panther_loss(batch, policy, **kwargs):
     """Calculate the supervised learning loss used to train the behavioral clone.
 
     Args:
@@ -624,10 +683,14 @@ def calculate_deep_panther_loss(batch, policy, yaw_loss_weight, is_lstm=False):
 
     """
 
-    # get the observation and action
-    
-    obs = batch[0]
-    acts = batch[1]
+    # unpack
+    en_network_type = kwargs.get('en_network_type')
+    yaw_loss_weight = kwargs.get('yaw_loss_weight')
+    obs_type = kwargs.get('obs_type')
+
+    # get the observation and action    
+    obs = batch['obs']
+    acts = batch['acts']
 
     # (TODO hardcoded)
     traj_size_pos_ctrl_pts = 15
@@ -637,17 +700,7 @@ def calculate_deep_panther_loss(batch, policy, yaw_loss_weight, is_lstm=False):
     policy.train()
 
     # get the predicted action
-
-    if is_lstm:
-        # TODO: length of the sequence is hardcoded
-        length_of_sequence = 1
-        obs = th.reshape(obs, (obs.shape[0], length_of_sequence, obs.shape[1])) # (batch_size, sequence_length, hidden_size)
-        pred_acts = policy(obs)
-    else:
-
-        print("obs shape: ", obs.shape)
-        pred_acts = policy(obs)
-        print("pred_acts shape: ", pred_acts.shape)
+    pred_acts = policy(obs, batch.x_dict, batch.edge_index_dict) if en_network_type == 'gnn' else policy(obs)
 
     # get size 
     num_of_traj_per_action=list(acts.shape)[1] #acts.shape is [batch size, num_traj_action, size_traj]

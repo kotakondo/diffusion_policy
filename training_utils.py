@@ -7,7 +7,7 @@ import torch.nn as nn
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
 from tqdm.auto import tqdm
-
+import datetime
 # import
 import torch as th
 
@@ -20,13 +20,20 @@ import wandb
 # import from py_panther
 from compression.utils.other import CostComputer
 
-def evaluate_mlp_or_lstm(dataset, policy, num_eval=10):
+def evaluate_non_diffusion_model(dataset, policy, **kwargs):
 
     """
     Evaluate noise_pred_net
     @param dataset_eval: evaluation dataset
     @param noise_pred_net: noise prediction network
     """
+
+    # unpack
+    num_eval = kwargs['num_eval']
+    en_network_type = kwargs['en_network_type']
+
+    # set policy to eval mode
+    policy.eval()
 
     # get cost computer
     cost_computer = CostComputer()
@@ -36,17 +43,22 @@ def evaluate_mlp_or_lstm(dataset, policy, num_eval=10):
 
     cost_expert, obst_avoidance_violation_expert, dyn_lim_violation_expert, augmented_cost_expert = [], [], [], []
     cost_student, obst_avoidance_violation_student, dyn_lim_violation_student, augmented_cost_student = [], [], [], []
-
     for dataset_idx in range(num_eval):
 
         # get expert actions and student actions
-        nob = dataset[dataset_idx][0].reshape(1, 1, -1)
-        expert_action = dataset[dataset_idx][1]
-        student_action = policy(nob)
+        nob = dataset[dataset_idx]['obs']
+        expert_action = dataset[dataset_idx]['acts']
 
-        # reshape to make it compatible with cost_computer
-        nob = nob.reshape(1, -1)
-        student_action = student_action.reshape(student_action.shape[1], -1)
+        if en_network_type == 'gnn':
+            x_dict = dataset[dataset_idx].x_dict
+            edge_index_dict = dataset[dataset_idx].edge_index_dict
+            student_action = policy(nob, x_dict, edge_index_dict) 
+            nob = nob.squeeze(0) # remove the first dimension
+            expert_action = expert_action.squeeze(0) # remove the first dimension
+        else:
+            student_action = policy(nob)
+
+        student_action = student_action.squeeze(0) # remove the first dimension
 
         # move to numpy
         nob = nob.detach().cpu().numpy()
@@ -82,30 +94,37 @@ def evaluate_mlp_or_lstm(dataset, policy, num_eval=10):
     # return
     return cost_expert, obst_avoidance_violation_expert, dyn_lim_violation_expert, augmented_cost_expert, cost_student, obst_avoidance_violation_student, dyn_lim_violation_student, augmented_cost_student
 
-def evaluate_diffusion_model(dataset, device, noise_pred_net, noise_scheduler, num_trajs, num_diffusion_iters, action_dim, use_gnn, num_eval):
+def evaluate_diffusion_model(dataset, policy, noise_scheduler, **kwargs):
 
     """
-    Evaluate noise_pred_net
+    Evaluate policy
     @param dataset_eval: evaluation dataset
     @param device: device to transfer data to
-    @param noise_pred_net: noise prediction network
+    @param policy: noise prediction network
     """
 
     # get cost computer
     cost_computer = CostComputer()
 
     # get expert actions and student actions
-    expert_actions, student_actions, nobs = get_nactions(noise_pred_net, noise_scheduler, dataset, num_trajs, num_diffusion_iters, action_dim, use_gnn, device, is_visualize=False, num_eval=num_eval)
+    expert_actions, student_actions, nobs = get_nactions(policy, noise_scheduler, dataset, is_visualize=False, **kwargs)
+
 
     # evaluation for expert actions
     cost_expert, obst_avoidance_violation_expert, dyn_lim_violation_expert, augmented_cost_expert = [], [], [], []
     for nob, expert_action in zip(nobs, expert_actions):
-        # compute cost
-        cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob, expert_action)
-        cost_expert.append(cost)
-        obst_avoidance_violation_expert.append(obst_avoidance_violation)
-        dyn_lim_violation_expert.append(dyn_lim_violation)
-        augmented_cost_expert.append(augmented_cost)
+        expert_action = expert_action.squeeze(0) # remove the first dimension
+        nob = nob.squeeze(0) # remove the first dimension
+        print("expert_action.shape: ", expert_action.shape)
+        print("nob.shape: ", nob.shape)
+        for j in range(expert_action.shape[0]): # for num_trajs we loop through
+            # compute cost
+            cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob, expert_action[[j], :])
+            cost_expert.append(cost)
+            obst_avoidance_violation_expert.append(obst_avoidance_violation)
+            dyn_lim_violation_expert.append(dyn_lim_violation)
+            augmented_cost_expert.append(augmented_cost)
+
     cost_expert = np.array(cost_expert)
     obst_avoidance_violation_expert = np.array(obst_avoidance_violation_expert)
     dyn_lim_violation_expert = np.array(dyn_lim_violation_expert)
@@ -114,11 +133,12 @@ def evaluate_diffusion_model(dataset, device, noise_pred_net, noise_scheduler, n
     # evaluation for student actions
     cost_student, obst_avoidance_violation_student, dyn_lim_violation_student, augmented_cost_student = [], [], [], []
     for nob, student_action in zip(nobs, student_actions):
-        # compute cost
-
-        for j in range(num_trajs):
-            
-            cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob, student_action[j,:].reshape(1, -1))
+        nob = nob.squeeze(0) # remove the first dimension
+        print("student_action.shape: ", student_action.shape)
+        print("nob.shape: ", nob.shape)
+        for j in range(student_action.shape[0]): # for num_trajs we loop through
+            # compute cost
+            cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob, student_action[[j], :])
             cost_student.append(cost)
             obst_avoidance_violation_student.append(obst_avoidance_violation)
             dyn_lim_violation_student.append(dyn_lim_violation)
@@ -132,7 +152,7 @@ def evaluate_diffusion_model(dataset, device, noise_pred_net, noise_scheduler, n
     # return
     return cost_expert, obst_avoidance_violation_expert, dyn_lim_violation_expert, augmented_cost_expert, cost_student, obst_avoidance_violation_student, dyn_lim_violation_student, augmented_cost_student
 
-def train_loop_diffusion_model(num_epochs, dataloader_training, dataset_training, device, noise_pred_net, noise_scheduler, ema, optimizer, lr_scheduler, use_gnn, dataset_eval, num_trajs, num_diffusion_iters, action_dim, save_dir, num_eval):
+def train_loop_diffusion_model(policy, optimizer, lr_scheduler, noise_scheduler, ema, **kwargs):
 
     """
     Train noise_pred_net
@@ -145,6 +165,18 @@ def train_loop_diffusion_model(num_epochs, dataloader_training, dataset_training
     @param optimizer: optimizer
     @param lr_scheduler: learning rate scheduler
     """
+
+    # unpack
+    num_epochs = kwargs['num_epochs']
+    dataloader_training = kwargs['datasets_loader']['dataloader_training']
+    use_gnn = kwargs['en_network_type'] == 'gnn'
+    device = kwargs['device']
+    save_dir = kwargs['save_dir']
+    dataset_eval = kwargs['datasets_loader']['dataset_eval']
+    dataset_training = kwargs['datasets_loader']['dataset_training']
+
+    # set policy to train mode
+    policy.train()
 
     # training loop
     wandb.init(project='diffusion')
@@ -161,26 +193,22 @@ def train_loop_diffusion_model(num_epochs, dataloader_training, dataset_training
                 for nbatch in tepoch:
 
                     # data reshape
-                    nobs = nbatch.obs if use_gnn else nbatch[0].to(device).unsqueeze(1)
-                    naction = nbatch.acts if use_gnn else nbatch[1].to(device).unsqueeze(1)
+                    nobs = nbatch['obs']
+                    naction = nbatch['acts']
+
                     x_dict = nbatch.x_dict if use_gnn else None
                     edge_index_dict = nbatch.edge_index_dict if use_gnn else None
                     B = nobs.shape[0]
 
                     # observation as FiLM conditioning
                     # (B, obs_horizon, obs_dim)
-                    obs_cond = nobs[:, :] 
+                    obs_cond = nobs[:, :, :]
                     
-                    if not use_gnn:
-                        # (B, obs_horizon * obs_dim)
-                        obs_cond = obs_cond.flatten(start_dim=1)
-                        # (B, num_trajs, action_dim)
-                        for j in range(num_trajs-1): # to replicate the expert action for num_trajs times
-                            naction = th.cat((naction, naction[:, -1:, :]), dim=1)
+                    # (B, obs_horizon * obs_dim)
+                    obs_cond = obs_cond.flatten(start_dim=1)
 
-                    # (B, num_trajs, action_dim)
-                    if use_gnn:
-                        naction = naction.unsqueeze(1)
+                    # naction's num_trajs needs to be a multiple of 2 so let's make it 8 for now
+                    # naction = naction[:, :8, :] # (B, num_trajs, action_dim)
 
                     # sample noise to add to actions
                     noise = th.randn(naction.shape, device=device)
@@ -193,19 +221,12 @@ def train_loop_diffusion_model(num_epochs, dataloader_training, dataset_training
 
                     # add noise to the clean images according to the noise magnitude at each diffusion iteration
                     # (this is the forward diffusion process)
-                    noisy_actions = noise_scheduler.add_noise(
-                        naction, noise, timesteps)
+                    noisy_actions = noise_scheduler.add_noise(naction, noise, timesteps)
                     
                     # predict the noise residual
-                    if use_gnn:
-                        # if use gnn, pass x_dict and edge_index_dict
-                        noise_pred = noise_pred_net(noisy_actions, timesteps, x_dict=x_dict, edge_index_dict=edge_index_dict)
-                    else:
-                        # if not use gnn, pass global_cond
-                        noise_pred = noise_pred_net(noisy_actions, timesteps, global_cond=obs_cond) 
+                    noise_pred = policy(sample=noisy_actions, timestep=timesteps, global_cond=obs_cond, x_dict=x_dict, edge_index_dict=edge_index_dict)
 
                     # L2 loss
-
                     loss = nn.functional.mse_loss(noise_pred, noise)
 
                     # optimize
@@ -217,7 +238,7 @@ def train_loop_diffusion_model(num_epochs, dataloader_training, dataset_training
                     lr_scheduler.step()
 
                     # update Exponential Moving Average of the model weights
-                    ema.step(noise_pred_net.parameters())
+                    ema.step(policy.parameters())
 
                     # logging
                     loss = loss.item()
@@ -228,18 +249,18 @@ def train_loop_diffusion_model(num_epochs, dataloader_training, dataset_training
                     wandb.log({'loss': loss, 'epoch': epoch_idx})
 
                 # save model
-                th.save(noise_pred_net.state_dict(), f'{save_dir}/diffusion_num_{epoch_counter}.pth')
+                th.save(policy.state_dict(), f'{save_dir}/diffusion_num_{epoch_counter}.pth')
                 epoch_counter += 1
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
 
             # each epoch, we evaluate the model on evaluation data
-            costs = evaluate_diffusion_model(dataset_eval, device, noise_pred_net, noise_scheduler, num_trajs, num_diffusion_iters, action_dim, use_gnn, num_eval)
+            costs = evaluate_diffusion_model(dataset_eval, policy, noise_scheduler, **kwargs)
             # unpack
             cost_expert_eval, obst_avoidance_violation_expert_eval, dyn_lim_violation_expert_eval, augmented_cost_expert_eval, cost_student_eval, obst_avoidance_violation_student_eval, dyn_lim_violation_student_eval, augmented_cost_student_eval = costs
 
             # each epoch we evaluate the model on training data too (to check overfitting)
-            costs = evaluate_diffusion_model(dataset_training, device, noise_pred_net, noise_scheduler, num_trajs, num_diffusion_iters, action_dim, use_gnn, num_eval)
+            costs = evaluate_diffusion_model(dataset_training, policy, noise_scheduler, **kwargs)
             # unpack
             cost_expert_training, obst_avoidance_violation_expert_training, dyn_lim_violation_expert_training, augmented_cost_expert_training, cost_student_training, obst_avoidance_violation_student_training, dyn_lim_violation_student_training, augmented_cost_student_training = costs
 
@@ -265,21 +286,31 @@ def train_loop_diffusion_model(num_epochs, dataloader_training, dataset_training
             if overfitting_counter >= 5:
                 break
             
-    return noise_pred_net
+    return policy
 
-def train_diffusion_model(num_epochs, dataloader_training, dataset_training, device, noise_pred_net, noise_scheduler, use_gnn, dataset_eval, num_trajs, num_diffusion_iters, action_dim, save_dir, num_eval):
+def train_diffusion_model(policy, noise_scheduler, **kwargs):
+
+    """
+    Train diffusion model
+    """
+
+    # unpack
+    dataloader_training = kwargs['datasets_loader']['dataloader_training']
+    num_epochs = kwargs['num_epochs']
+    save_dir = kwargs['save_dir']
+    use_gnn = kwargs['en_network_type'] == 'gnn'
 
     # Exponential Moving Average
     # accelerates training and improves stability
     # holds a copy of the model weights
     ema = EMAModel(
-        parameters=noise_pred_net.parameters(),
+        parameters=policy.parameters(),
         power=0.75)
 
     # Standard ADAM optimizer
     # Note that EMA parametesr are not optimized
     optimizer = th.optim.AdamW(
-        params=noise_pred_net.parameters(),
+        params=policy.parameters(),
         lr=1e-4, weight_decay=1e-6)
 
     # Cosine LR schedule with linear warmup
@@ -291,43 +322,34 @@ def train_diffusion_model(num_epochs, dataloader_training, dataset_training, dev
     )
 
     # training loop
-    noise_pred_net = train_loop_diffusion_model(
-        num_epochs=num_epochs,
-        dataloader_training=dataloader_training,
-        dataset_training=dataset_training,
-        device=device,
-        noise_pred_net=noise_pred_net,
-        noise_scheduler=noise_scheduler,
-        ema=ema,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        use_gnn=use_gnn,
-        dataset_eval=dataset_eval,
-        num_trajs=num_trajs,
-        num_diffusion_iters=num_diffusion_iters,
-        action_dim=action_dim,
-        save_dir=save_dir,
-        num_eval=num_eval
-    )
+    policy = train_loop_diffusion_model(policy, optimizer, lr_scheduler, noise_scheduler, ema, **kwargs) 
 
     # Weights of the EMA model
     # is used for inference
-    ema_noise_pred_net = noise_pred_net
-    ema.copy_to(ema_noise_pred_net.parameters())
+    ema.copy_to(policy.parameters())
 
     # save model
     filename = f'{save_dir}/diffusion_model_final.pth' if not use_gnn else f'{save_dir}/gnn_diffusion_model_final.pth'
-    th.save(ema_noise_pred_net.state_dict(), filename)
+    th.save(policy.state_dict(), filename)
 
-    return ema_noise_pred_net
+    return policy
 
-def train_loop_mlp(num_epochs, dataloader_training, dataset_training, dataset_eval, action_dim, save_dir, policy, yaw_loss_weight, optimizer, lr_scheduler, num_eval):
+def train_loop_non_diffusion_model(policy, optimizer, lr_scheduler, **kwargs):
     """
-    Train MLP
+    Train MLP/LSTM/Transformer
     """
+
+    # unpack
+    num_epochs = kwargs['num_epochs']
+    dataloader_training = kwargs['datasets_loader']['dataloader_training']
+    dataset_training = kwargs['datasets_loader']['dataset_training']
+    dataset_eval = kwargs['datasets_loader']['dataset_eval']
+    save_dir = kwargs['save_dir']
+    num_eval = kwargs['num_eval']
+    en_network_type = kwargs['en_network_type']
 
     # training loop
-    wandb.init(project='mlp')
+    wandb.init(project=en_network_type)
     epoch_counter = 0
     overfitting_counter = 0
     with tqdm(range(num_epochs), desc='Epoch') as tglobal:
@@ -340,15 +362,10 @@ def train_loop_mlp(num_epochs, dataloader_training, dataset_training, dataset_ev
             with tqdm(dataloader_training, desc='Batch', leave=False) as tepoch:
                 for nbatch in tepoch:
 
-                    # calculate loss
-                    loss = calculate_deep_panther_loss(nbatch, policy, yaw_loss_weight)
-
-                    # optimize
+                    loss = calculate_deep_panther_loss(nbatch, policy, **kwargs) # calculate loss
                     loss.backward()
                     optimizer.step()
                     optimizer.zero_grad()
-                    # step lr scheduler every batch
-                    # this is different from standard pytorch behavior
                     lr_scheduler.step()
 
                     # logging
@@ -367,13 +384,13 @@ def train_loop_mlp(num_epochs, dataloader_training, dataset_training, dataset_ev
 
             # each epoch, we evaluate the model on evaluation data
             with th.no_grad():
-                costs = evaluate_mlp_or_lstm(dataset_eval, policy, num_eval)
+                costs = evaluate_non_diffusion_model(dataset_eval, policy, **kwargs)
             # unpack
             cost_expert_eval, obst_avoidance_violation_expert_eval, dyn_lim_violation_expert_eval, augmented_cost_expert_eval, cost_student_eval, obst_avoidance_violation_student_eval, dyn_lim_violation_student_eval, augmented_cost_student_eval = costs
 
             # each epoch we evaluate the model on training data too (to check overfitting)
             with th.no_grad():
-                costs = evaluate_mlp_or_lstm(dataset_training, policy, num_eval)
+                costs = evaluate_non_diffusion_model(dataset_eval, policy, **kwargs)
             # unpack
             cost_expert_training, obst_avoidance_violation_expert_training, dyn_lim_violation_expert_training, augmented_cost_expert_training, cost_student_training, obst_avoidance_violation_student_training, dyn_lim_violation_student_training, augmented_cost_student_training = costs
 
@@ -401,7 +418,17 @@ def train_loop_mlp(num_epochs, dataloader_training, dataset_training, dataset_ev
             
     return policy
 
-def train_mlp(num_epochs, dataloader_training, dataset_training, policy, dataset_eval, action_dim, save_dir, num_eval):
+def train_non_diffusion_model(policy, **kwargs):
+
+    """
+    Train MLP
+    """
+
+    # unpack
+    num_epochs = kwargs['num_epochs']
+    dataloader_training = kwargs['datasets_loader']['dataloader_training']
+    save_dir = kwargs['save_dir']
+    en_network_type = kwargs['en_network_type']
 
     # Standard ADAM optimizer
     # Note that EMA parametesr are not optimized
@@ -418,284 +445,65 @@ def train_mlp(num_epochs, dataloader_training, dataset_training, policy, dataset
     )
 
     # training loop
-    policy = train_loop_mlp(
-        num_epochs=num_epochs,
-        dataloader_training=dataloader_training,
-        dataset_training=dataset_training,
-        dataset_eval=dataset_eval,
-        action_dim=action_dim,
-        save_dir=save_dir,
-        policy=policy,
-        yaw_loss_weight=1,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        num_eval=num_eval
-    )
+    policy = train_loop_non_diffusion_model(policy, optimizer, lr_scheduler, **kwargs)
 
     # save model
-    filename = f'{save_dir}/mlp_final.pth'
+    filename = f'{save_dir}/{en_network_type}_final.pth'
     th.save(policy.state_dict(), filename)
 
     return policy
 
-def train_loop_lstm(num_epochs, dataloader_training, dataset_training, dataset_eval, action_dim, save_dir, policy, yaw_loss_weight, optimizer, lr_scheduler, num_eval):
+def test_net(policy, dataset, noise_scheduler=None, **kwargs):
 
     """
-    Train LSTM
+    Test policy after training
     """
 
-    # training loop
-    wandb.init(project='lstm')
-    epoch_counter = 0
-    overfitting_counter = 0
-    with tqdm(range(num_epochs), desc='Epoch') as tglobal:
-        
-        # epoch loop
-        for epoch_idx in tglobal:
-            epoch_loss = list()
-            
-            # batch loop
-            with tqdm(dataloader_training, desc='Batch', leave=False) as tepoch:
-                for nbatch in tepoch:
-
-                    # calculate loss
-                    loss = calculate_deep_panther_loss(nbatch, policy, yaw_loss_weight, is_lstm=True)
-
-                    # optimize
-                    loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    # step lr scheduler every batch
-                    # this is different from standard pytorch behavior
-                    lr_scheduler.step()
-
-                    # logging
-                    loss = loss.item()
-                    epoch_loss.append(loss)
-                    tepoch.set_postfix(loss=loss)
-
-                    # wandb logging
-                    wandb.log({'loss': loss, 'epoch': epoch_idx})
-
-                # save model
-                th.save(policy.state_dict(), f'{save_dir}/lstm_num_{epoch_counter}.pth')
-                epoch_counter += 1
-                    
-            tglobal.set_postfix(loss=np.mean(epoch_loss))
-
-            # each epoch, we evaluate the model on evaluation data
-            with th.no_grad():
-                costs = evaluate_mlp_or_lstm(dataset_eval, policy, num_eval)
-            # unpack
-            cost_expert_eval, obst_avoidance_violation_expert_eval, dyn_lim_violation_expert_eval, augmented_cost_expert_eval, cost_student_eval, obst_avoidance_violation_student_eval, dyn_lim_violation_student_eval, augmented_cost_student_eval = costs
-
-            # each epoch we evaluate the model on training data too (to check overfitting)
-            with th.no_grad():
-                costs = evaluate_mlp_or_lstm(dataset_training, policy, num_eval)
-            # unpack
-            cost_expert_training, obst_avoidance_violation_expert_training, dyn_lim_violation_expert_training, augmented_cost_expert_training, cost_student_training, obst_avoidance_violation_student_training, dyn_lim_violation_student_training, augmented_cost_student_training = costs
-
-            # wandb logging
-            wandb.log({
-                'min_cost_expert_eval': np.min(cost_expert_eval),
-                'avg_cost_expert_eval': np.mean(cost_expert_eval),
-                'min_cost_student_eval': np.min(cost_student_eval),
-                'avg_cost_student_eval': np.mean(cost_student_eval),
-                'min_cost_expert_training': np.min(cost_expert_training),
-                'avg_cost_expert_training': np.mean(cost_expert_training),
-                'min_cost_student_training': np.min(cost_student_training),
-                'avg_cost_student_training': np.mean(cost_student_training),
-                'epoch': epoch_idx
-            })
-            
-            # terminate conditions
-            # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
-            if epoch_counter >= num_epochs and np.mean(augmented_cost_expert_eval) < np.mean(augmented_cost_student_eval):
-                overfitting_counter += 1
-            else:
-                overfitting_counter = 0
-            if overfitting_counter >= 5:
-                break
-            
-    return policy
-
-def train_lstm(num_epochs, dataloader_training, dataset_training, policy, dataset_eval, action_dim, save_dir, num_eval):
-
-    # Standard ADAM optimizer
-    # Note that EMA parametesr are not optimized
-    optimizer = th.optim.AdamW(
-        params=policy.parameters(),
-        lr=1e-4, weight_decay=1e-6)
-
-    # Cosine LR schedule with linear warmup
-    lr_scheduler = get_scheduler(
-        name='cosine',
-        optimizer=optimizer,
-        num_warmup_steps=500,
-        num_training_steps=len(dataloader_training) * num_epochs
-    )
-
-    # training loop
-    policy = train_loop_lstm(
-        num_epochs=num_epochs,
-        dataloader_training=dataloader_training,
-        dataset_training=dataset_training,
-        dataset_eval=dataset_eval,
-        action_dim=action_dim,
-        save_dir=save_dir,
-        policy=policy,
-        yaw_loss_weight=1,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        num_eval=num_eval
-    )
-
-    # save model
-    filename = f'{save_dir}/lstm_final.pth'
-    th.save(policy.state_dict(), filename)
-
-    return policy
-
-def test_net(dataset_test, device, policy, use_gnn, network_type):
+    # unpack
+    en_network_type = kwargs['en_network_type']
+    de_network_type = kwargs['de_network_type']
+    train_model = kwargs['train_model']
+    save_dir = kwargs['save_dir']
+    model_path = kwargs['model_path']
 
     # evaluate on test data
-    if network_type == 'diffusion':
-        cost_expert_test, obst_avoidance_violation_expert_test, dyn_lim_violation_expert_test, augmented_cost_expert_test, cost_student_test, obst_avoidance_violation_student_test, dyn_lim_violation_student_test, augmented_cost_student_test = evaluate_diffusion_model(dataset_test, device, policy, use_gnn)
-    elif network_type == 'mlp' or network_type == 'lstm':
-        cost_expert_test, obst_avoidance_violation_expert_test, dyn_lim_violation_expert_test, augmented_cost_expert_test, cost_student_test, obst_avoidance_violation_student_test, dyn_lim_violation_student_test, augmented_cost_student_test = evaluate_mlp_or_lstm(dataset_test, policy, action_dim, num_eval=10)
+    if de_network_type == 'diffusion':
+        costs = evaluate_diffusion_model(dataset, policy, noise_scheduler, **kwargs)
+    elif de_network_type == 'mlp' or de_network_type == 'lstm' or de_network_type == 'transformer':
+        costs = evaluate_non_diffusion_model(dataset, policy, **kwargs)
+    cost_expert_test, obst_avoidance_violation_expert_test, dyn_lim_violation_expert_test, augmented_cost_expert_test, cost_student_test, obst_avoidance_violation_student_test, dyn_lim_violation_student_test, augmented_cost_student_test = costs
 
-    # wandb logging
-    wandb.log({
-        'cost_expert_test': cost_expert_test,
-        'obst_avoidance_violation_expert_test': obst_avoidance_violation_expert_test,
-        'dyn_lim_violation_expert_test': dyn_lim_violation_expert_test,
-        'augmented_cost_expert_test': augmented_cost_expert_test,
-        'cost_student_test': cost_student_test,
-        'obst_avoidance_violation_student_test': obst_avoidance_violation_student_test,
-        'dyn_lim_violation_student_test': dyn_lim_violation_student_test,
-        'augmented_cost_student_test': augmented_cost_student_test,
-    })
 
     # print
-    print("cost_expert_test: ", cost_expert_test)
-    print("cost_student_test: ", cost_student_test)
-    print("augmented_cost_expert_test: ", augmented_cost_expert_test)
-    print("augmented_cost_student_test: ", augmented_cost_student_test)
+    print("en_network_type:             ", en_network_type)
+    print("de_network_type:             ", de_network_type)
+    print("cost_expert_test:            ", np.mean(cost_expert_test))
+    print("cost_student_test:           ", np.mean(cost_student_test))
+    print("augmented_cost_expert_test:  ", np.mean(augmented_cost_expert_test))
+    print("augmented_cost_student_test: ", np.mean(augmented_cost_student_test))
+    
+    # wandb logging
+    if train_model: # if we are training the model, then log the test results
+        wandb.log({
+            'cost_expert_test': cost_expert_test,
+            'obst_avoidance_violation_expert_test': obst_avoidance_violation_expert_test,
+            'dyn_lim_violation_expert_test': dyn_lim_violation_expert_test,
+            'augmented_cost_expert_test': augmented_cost_expert_test,
+            'cost_student_test': cost_student_test,
+            'obst_avoidance_violation_student_test': obst_avoidance_violation_student_test,
+            'dyn_lim_violation_student_test': dyn_lim_violation_student_test,
+            'augmented_cost_student_test': augmented_cost_student_test,
+        })
 
-def train_loop_transformer(num_epochs, dataloader_training, dataset_training, dataset_eval, action_dim, save_dir, policy, yaw_loss_weight, optimizer, lr_scheduler, num_eval):
-
-    """
-    Train Transformer
-    """
-
-    # training loop
-    wandb.init(project='transformer')
-    epoch_counter = 0
-    overfitting_counter = 0
-    with tqdm(range(num_epochs), desc='Epoch') as tglobal:
-        
-        # epoch loop
-        for epoch_idx in tglobal:
-            epoch_loss = list()
-            
-            # batch loop
-            with tqdm(dataloader_training, desc='Batch', leave=False) as tepoch:
-                for nbatch in tepoch:
-
-                    # calculate loss
-                    loss = calculate_deep_panther_loss(nbatch, policy, yaw_loss_weight, is_lstm=True)
-
-                    # optimize
-                    loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    # step lr scheduler every batch
-                    # this is different from standard pytorch behavior
-                    lr_scheduler.step()
-
-                    # logging
-                    loss = loss.item()
-                    epoch_loss.append(loss)
-                    tepoch.set_postfix(loss=loss)
-
-                    # wandb logging
-                    wandb.log({'loss': loss, 'epoch': epoch_idx})
-
-                # save model
-                th.save(policy.state_dict(), f'{save_dir}/transformer_num_{epoch_counter}.pth')
-                epoch_counter += 1
-                    
-            tglobal.set_postfix(loss=np.mean(epoch_loss))
-
-            # each epoch, we evaluate the model on evaluation data
-            with th.no_grad():
-                costs = evaluate_mlp_or_lstm(dataset_eval, policy, num_eval)
-            # unpack
-            cost_expert_eval, obst_avoidance_violation_expert_eval, dyn_lim_violation_expert_eval, augmented_cost_expert_eval, cost_student_eval, obst_avoidance_violation_student_eval, dyn_lim_violation_student_eval, augmented_cost_student_eval = costs
-
-            # each epoch we evaluate the model on training data too (to check overfitting)
-            with th.no_grad():
-                costs = evaluate_mlp_or_lstm(dataset_training, policy, num_eval)
-            # unpack
-            cost_expert_training, obst_avoidance_violation_expert_training, dyn_lim_violation_expert_training, augmented_cost_expert_training, cost_student_training, obst_avoidance_violation_student_training, dyn_lim_violation_student_training, augmented_cost_student_training = costs
-
-            # wandb logging
-            wandb.log({
-                'min_cost_expert_eval': np.min(cost_expert_eval),
-                'avg_cost_expert_eval': np.mean(cost_expert_eval),
-                'min_cost_student_eval': np.min(cost_student_eval),
-                'avg_cost_student_eval': np.mean(cost_student_eval),
-                'min_cost_expert_training': np.min(cost_expert_training),
-                'avg_cost_expert_training': np.mean(cost_expert_training),
-                'min_cost_student_training': np.min(cost_student_training),
-                'avg_cost_student_training': np.mean(cost_student_training),
-                'epoch': epoch_idx
-            })
-            
-            # terminate conditions
-            # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
-            if epoch_counter >= num_epochs and np.mean(augmented_cost_expert_eval) < np.mean(augmented_cost_student_eval):
-                overfitting_counter += 1
-            else:
-                overfitting_counter = 0
-            if overfitting_counter >= 5:
-                break
-            
-    return policy
-
-def train_transformer(num_epochs, dataloader_training, dataset_training, policy, dataset_eval, action_dim, save_dir, num_eval):
-
-    # Standard ADAM optimizer
-    # Note that EMA parametesr are not optimized
-    optimizer = th.optim.AdamW(
-        params=policy.parameters(),
-        lr=1e-4, weight_decay=1e-6)
-
-    # Cosine LR schedule with linear warmup
-    lr_scheduler = get_scheduler(
-        name='cosine',
-        optimizer=optimizer,
-        num_warmup_steps=500,
-        num_training_steps=len(dataloader_training) * num_epochs
-    )
-
-    # training loop
-    policy = train_loop_transformer(
-        num_epochs=num_epochs,
-        dataloader_training=dataloader_training,
-        dataset_training=dataset_training,
-        dataset_eval=dataset_eval,
-        action_dim=action_dim,
-        save_dir=save_dir,
-        policy=policy,
-        yaw_loss_weight=1,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        num_eval=num_eval
-    )
-
-    # save model
-    filename = f'{save_dir}/transformer_final.pth'
-    th.save(policy.state_dict(), filename)
-
-    return policy
+    # save results in file
+    path = save_dir if train_model else model_path
+    with open(f'/media/jtorde/T7/gdp/benchmark_results.txt', 'a') as f:
+        f.write(f'date:                        {datetime.datetime.now()}\n')
+        f.write(f'en_network_type:             {en_network_type}\n')
+        f.write(f'de_network_type:             {de_network_type}\n')
+        f.write(f'model_path:                  {path}\n')
+        f.write(f'cost_expert_test:            {np.mean(cost_expert_test)}\n')
+        f.write(f'cost_student_test:           {np.mean(cost_student_test)}\n')
+        f.write(f'augmented_cost_expert_test:  {np.mean(augmented_cost_expert_test)}\n')
+        f.write(f'augmented_cost_student_test: {np.mean(augmented_cost_student_test)}\n')
+        f.write(f'\n')
