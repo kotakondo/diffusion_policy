@@ -28,16 +28,16 @@ def main():
     """ ********************* ARGUMENTS ********************* """
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('-m', '--machine', default='kota2', help='machine', type=str)
     parser.add_argument('-d', '--data-dir', default='/media/jtorde/T7/gdp/evals-dir/evals4/tmp_dagger/2/demos/', help='directory', type=str)
     parser.add_argument('-s', '--save-dir', default='/media/jtorde/T7/gdp/models/', help='save directory', type=str)
     parser.add_argument('-t', '--test', default=False, help='test (small dataset)', type=str2bool)
-    parser.add_argument('--train-model', default=True, help='train model', type=str2bool)
-    parser.add_argument('--model-path', default=None, help='model path', type=str)
     parser.add_argument('-en', '--en-network-type', default='mlp', help='encoder network type (/mlp/lstm/transformer/gnn)', type=str)
-    parser.add_argument('-dn', '--de-network-type', default='mlp', help='encoder network type (diffusion/mlp)', type=str)
+    parser.add_argument('-de', '--de-network-type', default='mlp', help='encoder network type (diffusion/mlp)', type=str)
     parser.add_argument('-o', '--observation-type', default='last', help='observation type (history/last)', type=str)
     parser.add_argument('-v', '--visualize', default=False, help='visualize', type=str2bool)
-    parser.add_argument('-m', '--machine', default='kota2', help='machine', type=str)
+    parser.add_argument('--train-model', default=True, help='train model', type=str2bool)
+    parser.add_argument('--model-path', default=None, help='model path', type=str)
     args = parser.parse_args()
 
     """ ********************* PARAMETERS ********************* """
@@ -87,8 +87,8 @@ def main():
     mlp_hidden_sizes = [1024, 1024]                                     # hidden sizes for mlp
     mlp_activation = nn.ReLU()                                          # activation for mlp
     lstm_hidden_size = 1024                                             # hidden size for lstm
-    transformer_d_model = 43 if en_network_type == 'mlp' else 23        # d_model for transformer (43 for mlp, 1, 13, 23, 299 for diffusion)
-    transformer_nhead = 43 if en_network_type == 'mlp' else 23          # nhead for transformer (43 for mlp, 1, 13, 23, 299 for diffusion)
+    transformer_d_model = 43 if de_network_type == 'mlp' else 23        # d_model for transformer (43 for mlp, 1, 13, 23, 299 for diffusion)
+    transformer_nhead = 43 if de_network_type == 'mlp' else 23          # nhead for transformer (43 for mlp, 1, 13, 23, 299 for diffusion)
     transformer_dim_feedforward = 1024                                  # feedforward_dim for transformer
     transformer_dropout = 0.1                                           # dropout for transformer
     gnn_hidden_channels = 1024                                          # hidden_channels for gnn
@@ -154,7 +154,8 @@ def main():
         'diffusion_step_embed_dim': 256,
         'diffusion_down_dims': [256, 512, 1024],
         'diffusion_kernel_size': 5,
-        'diffusion_n_groups': 8
+        'diffusion_n_groups': 8,
+        'machine': args.machine,
     }
 
     # create dataset
