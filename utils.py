@@ -19,7 +19,7 @@ from torch_geometric.data import HeteroData
 
 # visualization import
 import matplotlib.pyplot as plt
-from compression.utils.other import ObservationManager, ActionManager, getZeroState
+# from compression.utils.other import ObservationManager, ActionManager, getZeroState
 
 # calculate loss
 from scipy.optimize import linear_sum_assignment
@@ -148,7 +148,7 @@ def create_pair_obs_act(**kwargs):
     percentage_training = kwargs.get('percentage_training')
     percentage_eval = kwargs.get('percentage_eval')
     percentage_test = kwargs.get('percentage_test')
-    total_num_demos = max_num_training_demos / percentage_training
+    total_num_demos = int(max_num_training_demos / percentage_training)
     data_dir = kwargs.get('data_dir')
     device = kwargs.get('device')
     obs_type = kwargs.get('obs_type')

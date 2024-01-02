@@ -18,7 +18,7 @@ from utils import get_nactions, calculate_deep_panther_loss
 import wandb
 
 # import from py_panther
-from compression.utils.other import CostComputer
+# from compression.utils.other import CostComputer
 
 def evaluate_non_diffusion_model(dataset, policy, **kwargs):
 
