@@ -98,6 +98,10 @@ class ConditionalResidualBlock1D(nn.Module):
         self.mlp_hidden_sizes = mlp_hidden_sizes
         self.mlp_activation = mlp_activation
 
+        # Use MLP for encoder
+        if self.en_network_type == "mlp":
+            linear_layer_input_dim = cond_dim
+
         # Use LSTM for encoder
         if self.en_network_type == "lstm":
             self.lstm = nn.LSTM(cond_dim, lstm_hidden_size, batch_first=True)
@@ -238,13 +242,13 @@ class ConditionalUnet1D(nn.Module):
         cond_dim = dsed + global_cond_dim
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
-        up_modules = nn.ModuleList([])
-        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
+        down_modules = nn.ModuleList([])
+        for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (len(in_out) - 1)
-            up_modules.append(nn.ModuleList([
-                ConditionalResidualBlock1D(dim_out*2, dim_in, cond_dim=cond_dim, **kwargs),
-                ConditionalResidualBlock1D(dim_in, dim_in, cond_dim=cond_dim, **kwargs),
-                Upsample1d(dim_in) if not is_last else nn.Identity()
+            down_modules.append(nn.ModuleList([
+                ConditionalResidualBlock1D(dim_in, dim_out, cond_dim=cond_dim, **kwargs),
+                ConditionalResidualBlock1D(dim_out, dim_out, cond_dim=cond_dim, **kwargs),
+                Downsample1d(dim_out) if not is_last else nn.Identity()
             ]))
 
         mid_dim = all_dims[-1]
@@ -253,13 +257,13 @@ class ConditionalUnet1D(nn.Module):
             ConditionalResidualBlock1D(mid_dim, mid_dim, cond_dim=cond_dim, **kwargs),
         ])
 
-        down_modules = nn.ModuleList([])
-        for ind, (dim_in, dim_out) in enumerate(in_out):
+        up_modules = nn.ModuleList([])
+        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (len(in_out) - 1)
-            down_modules.append(nn.ModuleList([
-                ConditionalResidualBlock1D(dim_in, dim_out, cond_dim=cond_dim, **kwargs),
-                ConditionalResidualBlock1D(dim_out, dim_out, cond_dim=cond_dim, **kwargs),
-                Downsample1d(dim_out) if not is_last else nn.Identity()
+            up_modules.append(nn.ModuleList([
+                ConditionalResidualBlock1D(dim_out*2, dim_in, cond_dim=cond_dim, **kwargs),
+                ConditionalResidualBlock1D(dim_in, dim_in, cond_dim=cond_dim, **kwargs),
+                Upsample1d(dim_in) if not is_last else nn.Identity()
             ]))
 
         final_conv = nn.Sequential(
