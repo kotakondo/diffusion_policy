@@ -254,37 +254,37 @@ def train_loop_diffusion_model(policy, optimizer, lr_scheduler, noise_scheduler,
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
 
-            # each epoch, we evaluate the model on evaluation data
-            costs = evaluate_diffusion_model(dataset_eval, policy, noise_scheduler, **kwargs)
-            # unpack
-            cost_expert_eval, obst_avoidance_violation_expert_eval, dyn_lim_violation_expert_eval, augmented_cost_expert_eval, cost_student_eval, obst_avoidance_violation_student_eval, dyn_lim_violation_student_eval, augmented_cost_student_eval = costs
+            # # each epoch, we evaluate the model on evaluation data
+            # costs = evaluate_diffusion_model(dataset_eval, policy, noise_scheduler, **kwargs)
+            # # unpack
+            # cost_expert_eval, obst_avoidance_violation_expert_eval, dyn_lim_violation_expert_eval, augmented_cost_expert_eval, cost_student_eval, obst_avoidance_violation_student_eval, dyn_lim_violation_student_eval, augmented_cost_student_eval = costs
 
-            # each epoch we evaluate the model on training data too (to check overfitting)
-            costs = evaluate_diffusion_model(dataset_training, policy, noise_scheduler, **kwargs)
-            # unpack
-            cost_expert_training, obst_avoidance_violation_expert_training, dyn_lim_violation_expert_training, augmented_cost_expert_training, cost_student_training, obst_avoidance_violation_student_training, dyn_lim_violation_student_training, augmented_cost_student_training = costs
+            # # each epoch we evaluate the model on training data too (to check overfitting)
+            # costs = evaluate_diffusion_model(dataset_training, policy, noise_scheduler, **kwargs)
+            # # unpack
+            # cost_expert_training, obst_avoidance_violation_expert_training, dyn_lim_violation_expert_training, augmented_cost_expert_training, cost_student_training, obst_avoidance_violation_student_training, dyn_lim_violation_student_training, augmented_cost_student_training = costs
 
-            # wandb logging
-            wandb.log({
-                'min_cost_expert_eval': np.min(cost_expert_eval),
-                'avg_cost_expert_eval': np.mean(cost_expert_eval),
-                'min_cost_student_eval': np.min(cost_student_eval),
-                'avg_cost_student_eval': np.mean(cost_student_eval),
-                'min_cost_expert_training': np.min(cost_expert_training),
-                'avg_cost_expert_training': np.mean(cost_expert_training),
-                'min_cost_student_training': np.min(cost_student_training),
-                'avg_cost_student_training': np.mean(cost_student_training),
-                'epoch': epoch_idx
-            })
+            # # wandb logging
+            # wandb.log({
+            #     'min_cost_expert_eval': np.min(cost_expert_eval),
+            #     'avg_cost_expert_eval': np.mean(cost_expert_eval),
+            #     'min_cost_student_eval': np.min(cost_student_eval),
+            #     'avg_cost_student_eval': np.mean(cost_student_eval),
+            #     'min_cost_expert_training': np.min(cost_expert_training),
+            #     'avg_cost_expert_training': np.mean(cost_expert_training),
+            #     'min_cost_student_training': np.min(cost_student_training),
+            #     'avg_cost_student_training': np.mean(cost_student_training),
+            #     'epoch': epoch_idx
+            # })
             
-            # terminate conditions
-            # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
-            if epoch_counter >= num_epochs and np.mean(augmented_cost_expert_eval) < np.mean(augmented_cost_student_eval):
-                overfitting_counter += 1
-            else:
-                overfitting_counter = 0
-            if overfitting_counter >= 5:
-                break
+            # # terminate conditions
+            # # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
+            # if epoch_counter >= num_epochs and np.mean(augmented_cost_expert_eval) < np.mean(augmented_cost_student_eval):
+            #     overfitting_counter += 1
+            # else:
+            #     overfitting_counter = 0
+            # if overfitting_counter >= 5:
+            #     break
             
     return policy
 
@@ -383,38 +383,38 @@ def train_loop_non_diffusion_model(policy, optimizer, lr_scheduler, **kwargs):
             tglobal.set_postfix(loss=np.mean(epoch_loss))
 
             # each epoch, we evaluate the model on evaluation data
-            with th.no_grad():
-                costs = evaluate_non_diffusion_model(dataset_eval, policy, **kwargs)
-            # unpack
-            cost_expert_eval, obst_avoidance_violation_expert_eval, dyn_lim_violation_expert_eval, augmented_cost_expert_eval, cost_student_eval, obst_avoidance_violation_student_eval, dyn_lim_violation_student_eval, augmented_cost_student_eval = costs
+            # with th.no_grad():
+            #     costs = evaluate_non_diffusion_model(dataset_eval, policy, **kwargs)
+            # # unpack
+            # cost_expert_eval, obst_avoidance_violation_expert_eval, dyn_lim_violation_expert_eval, augmented_cost_expert_eval, cost_student_eval, obst_avoidance_violation_student_eval, dyn_lim_violation_student_eval, augmented_cost_student_eval = costs
 
-            # each epoch we evaluate the model on training data too (to check overfitting)
-            with th.no_grad():
-                costs = evaluate_non_diffusion_model(dataset_eval, policy, **kwargs)
-            # unpack
-            cost_expert_training, obst_avoidance_violation_expert_training, dyn_lim_violation_expert_training, augmented_cost_expert_training, cost_student_training, obst_avoidance_violation_student_training, dyn_lim_violation_student_training, augmented_cost_student_training = costs
+            # # each epoch we evaluate the model on training data too (to check overfitting)
+            # with th.no_grad():
+            #     costs = evaluate_non_diffusion_model(dataset_eval, policy, **kwargs)
+            # # unpack
+            # cost_expert_training, obst_avoidance_violation_expert_training, dyn_lim_violation_expert_training, augmented_cost_expert_training, cost_student_training, obst_avoidance_violation_student_training, dyn_lim_violation_student_training, augmented_cost_student_training = costs
 
-            # wandb logging
-            wandb.log({
-                'min_cost_expert_eval': np.min(cost_expert_eval),
-                'avg_cost_expert_eval': np.mean(cost_expert_eval),
-                'min_cost_student_eval': np.min(cost_student_eval),
-                'avg_cost_student_eval': np.mean(cost_student_eval),
-                'min_cost_expert_training': np.min(cost_expert_training),
-                'avg_cost_expert_training': np.mean(cost_expert_training),
-                'min_cost_student_training': np.min(cost_student_training),
-                'avg_cost_student_training': np.mean(cost_student_training),
-                'epoch': epoch_idx
-            })
+            # # wandb logging
+            # wandb.log({
+            #     'min_cost_expert_eval': np.min(cost_expert_eval),
+            #     'avg_cost_expert_eval': np.mean(cost_expert_eval),
+            #     'min_cost_student_eval': np.min(cost_student_eval),
+            #     'avg_cost_student_eval': np.mean(cost_student_eval),
+            #     'min_cost_expert_training': np.min(cost_expert_training),
+            #     'avg_cost_expert_training': np.mean(cost_expert_training),
+            #     'min_cost_student_training': np.min(cost_student_training),
+            #     'avg_cost_student_training': np.mean(cost_student_training),
+            #     'epoch': epoch_idx
+            # })
             
-            # terminate conditions
-            # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
-            if epoch_counter >= num_epochs and np.mean(augmented_cost_expert_eval) < np.mean(augmented_cost_student_eval):
-                overfitting_counter += 1
-            else:
-                overfitting_counter = 0
-            if overfitting_counter >= 5:
-                break
+            # # terminate conditions
+            # # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
+            # if epoch_counter >= num_epochs and np.mean(augmented_cost_expert_eval) < np.mean(augmented_cost_student_eval):
+            #     overfitting_counter += 1
+            # else:
+            #     overfitting_counter = 0
+            # if overfitting_counter >= 5:
+            #     break
             
     return policy
 
