@@ -37,22 +37,29 @@ def main():
     parser.add_argument('-dn', '--de-network-type', default='mlp', help='encoder network type (diffusion/mlp)', type=str)
     parser.add_argument('-o', '--observation-type', default='last', help='observation type (history/last)', type=str)
     parser.add_argument('-v', '--visualize', default=False, help='visualize', type=str2bool)
+    parser.add_argument('-m', '--machine', default='kota2', help='machine', type=str)
     args = parser.parse_args()
 
     """ ********************* PARAMETERS ********************* """
 
     # parameters
-    data_dir = args.data_dir                                            # list npz files in the directory
-    save_dir = args.save_dir                                            # save directory
+    if args.machine == 'kota2':
+        data_dir = args.data_dir
+        save_dir = args.save_dir
+    elif args.machine == 'lambda03' or args.machine == 'lambda04':
+        data_dir = './evals-dir/evals4/tmp_dagger/2/demos/'
+        save_dir = './models/'
+
     is_test_run = args.test                                             # test run?
     train_model = args.train_model                                      # train model?
     model_path = args.model_path                                        # model path
     en_network_type = args.en_network_type                              # encoder network type
     de_network_type = args.de_network_type                              # decoder network type
     obs_type = args.observation_type                                    # observation type
+    is_visualize = args.visualize                                       # visualize?
     
     # default parameters
-    device = th.device('cpu') #if not use_gnn else th.device('cuda')   # if we use gnn, we need to use cpu (this is because we use shuffle and worker processes in dataloader)
+    device = th.device('cpu') #if not use_gnn else th.device('cuda')    # if we use gnn, we need to use cpu (this is because we use shuffle and worker processes in dataloader)
     th.set_default_device(device)                                       # set default device                                   
     th.set_default_dtype(th.float32)                                    # set default dtype
     max_num_training_demos = 10_000 if not is_test_run else 100         # max number of training demonstrations
@@ -63,7 +70,7 @@ def main():
     obs_horizon = 1                                                     # TODO remove (from diffuion policy paper)
     obs_dim = 43                                                        # if we use GNN, this will be overwritten in Conditional REsidualBlock1D and won't be used
     action_dim = 22                                                     # 15(pos) + 6(yaw) + 1(time)
-    num_diffusion_iters = 50                                           # number of diffusion iterations
+    num_diffusion_iters = 50                                            # number of diffusion iterations
     num_epochs = 500 if not is_test_run else 1                          # number of epochs
     num_eval = 10                                                       # number of evaluation data points
     batch_size = 128                                                    # batch size
@@ -232,7 +239,7 @@ def main():
     
     """ ********************* VISUALIZATION ********************* """
 
-    if args.visualize:
+    if is_visualize:
         # TODO only supports diffusion model
         visualize(save_dir, use_gnn, device, num_eval, num_trajs, num_diffusion_iters, action_dim, policy, noise_scheduler, dataset_test)
 
