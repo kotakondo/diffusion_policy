@@ -171,6 +171,7 @@ def train_loop_diffusion_model(policy, optimizer, lr_scheduler, noise_scheduler,
     dataset_training = kwargs['datasets_loader']['dataset_training']
     en_network_type = kwargs['en_network_type']
     de_network_type = kwargs['de_network_type']
+    policy_save_freq = kwargs['policy_save_freq']
 
     # set policy to train mode
     policy.train()
@@ -245,10 +246,11 @@ def train_loop_diffusion_model(policy, optimizer, lr_scheduler, noise_scheduler,
                     # wandb logging
                     wandb.log({'loss': loss, 'epoch': epoch_idx})
 
-                # save model
+            # save model
+            if epoch_counter % policy_save_freq == 0:
                 filename = f'{save_dir}/{en_network_type}_{de_network_type}_num_{epoch_counter}.pth'
                 th.save(policy.state_dict(), filename)
-                epoch_counter += 1
+            epoch_counter += 1
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
 
@@ -348,6 +350,7 @@ def train_loop_non_diffusion_model(policy, optimizer, lr_scheduler, **kwargs):
     num_eval = kwargs['num_eval']
     en_network_type = kwargs['en_network_type']
     de_network_type = kwargs['de_network_type']
+    policy_save_freq = kwargs['policy_save_freq']
 
     # training loop
     wandb.init(project=en_network_type)
@@ -377,10 +380,11 @@ def train_loop_non_diffusion_model(policy, optimizer, lr_scheduler, **kwargs):
                     # wandb logging
                     wandb.log({'loss': loss, 'epoch': epoch_idx})
 
-                # save model
+            # save model
+            if epoch_counter % policy_save_freq == 0:
                 filename = f'{save_dir}/{en_network_type}_{de_network_type}_num_{epoch_counter}.pth'
                 th.save(policy.state_dict(), filename)
-                epoch_counter += 1
+            epoch_counter += 1
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
 
