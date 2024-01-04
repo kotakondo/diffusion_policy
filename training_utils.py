@@ -115,9 +115,6 @@ def evaluate_diffusion_model(dataset, policy, noise_scheduler, **kwargs):
     cost_expert, obst_avoidance_violation_expert, dyn_lim_violation_expert, augmented_cost_expert = [], [], [], []
     for nob, expert_action in zip(nobs, expert_actions):
         expert_action = expert_action.squeeze(0) # remove the first dimension
-        nob = nob.squeeze(0) # remove the first dimension
-        print("expert_action.shape: ", expert_action.shape)
-        print("nob.shape: ", nob.shape)
         for j in range(expert_action.shape[0]): # for num_trajs we loop through
             # compute cost
             cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob, expert_action[[j], :])
@@ -134,9 +131,6 @@ def evaluate_diffusion_model(dataset, policy, noise_scheduler, **kwargs):
     # evaluation for student actions
     cost_student, obst_avoidance_violation_student, dyn_lim_violation_student, augmented_cost_student = [], [], [], []
     for nob, student_action in zip(nobs, student_actions):
-        nob = nob.squeeze(0) # remove the first dimension
-        print("student_action.shape: ", student_action.shape)
-        print("nob.shape: ", nob.shape)
         for j in range(student_action.shape[0]): # for num_trajs we loop through
             # compute cost
             cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob, student_action[[j], :])
@@ -481,7 +475,6 @@ def test_net(policy, dataset, noise_scheduler=None, **kwargs):
     elif de_network_type == 'mlp' or de_network_type == 'lstm' or de_network_type == 'transformer':
         costs = evaluate_non_diffusion_model(dataset, policy, **kwargs)
     cost_expert_test, obst_avoidance_violation_expert_test, dyn_lim_violation_expert_test, augmented_cost_expert_test, cost_student_test, obst_avoidance_violation_student_test, dyn_lim_violation_student_test, augmented_cost_student_test = costs
-
 
     # print
     print("en_network_type:             ", en_network_type)

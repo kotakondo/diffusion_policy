@@ -28,7 +28,7 @@ def main():
     """ ********************* ARGUMENTS ********************* """
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-m', '--machine', default='kota2', help='machine', type=str)
+    parser.add_argument('-m', '--machine', default='jtorde', help='machine', type=str)
     parser.add_argument('-d', '--data-dir', default='/media/jtorde/T7/gdp/evals-dir/evals4/tmp_dagger/2/demos/', help='directory', type=str)
     parser.add_argument('-s', '--save-dir', default='/media/jtorde/T7/gdp/models/', help='save directory', type=str)
     parser.add_argument('-t', '--test', default=False, help='test (small dataset)', type=str2bool)
@@ -45,10 +45,10 @@ def main():
     """ ********************* PARAMETERS ********************* """
 
     # parameters
-    if args.machine == 'kota2':
+    if args.machine == 'jtorde':
         data_dir = args.data_dir
         save_dir = args.save_dir
-    elif args.machine == 'lambda03' or args.machine == 'lambda04':
+    else: # lambda machines
         data_dir = './evals-dir/evals4/tmp_dagger/2/demos/'
         save_dir = './models/'
 

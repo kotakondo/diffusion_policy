@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 
 import subprocess
-import argparse
 import os
-
-# parse arguments
-parser = argparse.ArgumentParser()
-parser.add_argument("-m", "--machine", help="machine to run on", type=str, default="kota2")
-args = parser.parse_args()
 
 # current directory
 cwd = os.getcwd()
 
+# get machine name
+machine = cwd.split("/")[2] 
+
 # run python script
-machine = args.machine
 encoders = ["mlp", "lstm", "transformer", "gnn"]
 decoders = ["mlp", "diffusion"]
 
