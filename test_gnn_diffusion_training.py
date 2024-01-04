@@ -154,6 +154,7 @@ def main():
         'diffusion_kernel_size': 5,
         'diffusion_n_groups': 8,
         'machine': args.machine,
+        'policy_save_freq': policy_save_freq,
     }
 
     # create dataset
