@@ -22,6 +22,3 @@ for encoder in encoders:
         cmd = f"python test_gnn_diffusion_training.py -en {encoder} -de {decoder} -m {machine}"
         print(cmd.split())
         subprocess.call(cmd.split(), cwd=cwd)
-
-
-# done: mlp-mlp, mlp-diffusion, lstm-mlp, lstm-diffusion, 

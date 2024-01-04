@@ -417,7 +417,10 @@ class MLP(nn.Module):
         elif self.en_network_type == "lstm":
 
             output, (h_n, c_n) = self.lstm(x) # get the output
-            output = output[:, -1, :] # get the last output
+            if len(output.shape) == 3:
+                output = output[:, -1, :]
+            else:
+                output = output[[-1], :]
             output = self.layers(output) # pass it through the layers
             output = self.tanh(output) # pass it through a tanh layer
             output = output.reshape(output.shape[0], self.num_trajs, self.output_dim) # reshape output to (batch_size, num_trajs, output_dim)

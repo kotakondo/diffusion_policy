@@ -36,8 +36,10 @@ def main():
     parser.add_argument('-de', '--de-network-type', default='mlp', help='encoder network type (diffusion/mlp)', type=str)
     parser.add_argument('-o', '--observation-type', default='last', help='observation type (history/last)', type=str)
     parser.add_argument('-v', '--visualize', default=False, help='visualize', type=str2bool)
+    parser.add_argument('--evaluate-after-training', default=False, help='evaluate after training', type=str2bool)
     parser.add_argument('--train-model', default=True, help='train model', type=str2bool)
     parser.add_argument('--model-path', default=None, help='model path', type=str)
+    parser.add_argument('--wandb', default=False, help='wandb', type=str2bool)
     args = parser.parse_args()
 
     """ ********************* PARAMETERS ********************* """
@@ -57,6 +59,7 @@ def main():
     de_network_type = args.de_network_type                              # decoder network type
     obs_type = args.observation_type                                    # observation type
     is_visualize = args.visualize                                       # visualize?
+    is_evaluate_after_training = args.evaluate_after_training           # evaluate after training?
     
     # default parameters
     device = th.device('cpu') #if not use_gnn else th.device('cuda')    # if we use gnn, we need to use cpu (this is because we use shuffle and worker processes in dataloader)
@@ -84,7 +87,7 @@ def main():
     """ ********************* NETWORK ********************* """
     # network parameters
 
-    mlp_hidden_sizes = [1024, 1024]                                     # hidden sizes for mlp
+    mlp_hidden_sizes = [1024, 1024, 1024, 1024]                         # hidden sizes for mlp
     mlp_activation = nn.ReLU()                                          # activation for mlp
     lstm_hidden_size = 1024                                             # hidden size for lstm
     transformer_d_model = 43 if de_network_type == 'mlp' else 23        # d_model for transformer (43 for mlp, 1, 13, 23, 299 for diffusion)
@@ -97,17 +100,10 @@ def main():
     gnn_group = 'max'                                                   # group for gnn
 
     # default model path
-    # if args.model_path is not None:
-    #     model_path = args.model_path
-    # elif network_type == 'diffusion':
-    #     model_path = '/media/jtorde/T7/gdp/models/model2/num_414_noise_pred_net.pth'
-    #     num_trajs = 1 # when i trained the model, i used num_trajs=1
-    # elif network_type == 'mlp':
-    #     model_path = '/media/jtorde/T7/gdp/models/model7/mlp_final.pth'
-    # elif network_type == 'lstm':
-    #     model_path = '/media/jtorde/T7/gdp/models/model8/lstm_final.pth'
-    # elif network_type == 'transformer':
-    #     model_path = '/media/jtorde/T7/gdp/models/model1-lambda03/transformer_final.pth'
+    if args.model_path is not None:
+        model_path = args.model_path
+    else:
+        model_path = save_dir + f'{en_network_type}_{de_network_type}/{en_network_type}_{de_network_type}_final.pt'
 
     """ ********************* DATA ********************* """
 
@@ -211,6 +207,12 @@ def main():
     elif de_network_type == 'mlp':
         # create policy for mlp
         policy = MLP(**kwargs)
+        policy.eval()
+        # you need to run policy to initialize the network
+        if en_network_type == 'gnn':
+            policy(th.zeros(1, obs_dim), x_dict=dataset_training[0].x_dict, edge_index_dict=dataset_training[0].edge_index_dict)
+        else:
+            policy(th.zeros(1, obs_dim))
 
     else:
         raise NotImplementedError
@@ -220,11 +222,12 @@ def main():
 
     """ ********************* LOAD MODEL ********************* """
 
-    if not train_model:
+    if model_path is not None:
         # load model
         print("model_path: ", model_path)
         model = th.load(model_path, map_location=device)
         policy.load_state_dict(model)
+        policy.eval()
 
     """ ********************* TRAINING ********************* """
 
