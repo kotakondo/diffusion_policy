@@ -767,7 +767,7 @@ def calculate_deep_panther_loss(batch, policy, **kwargs):
         cost_matrix=cost_matrix[is_repeated[index_batch,:]==False]   #np.delete(cost_matrix_numpy, rows_to_delete, axis=0)
         cost_matrix_numpy=cost_matrix.cpu().detach().numpy()
 
-        # Solve assignment problem                                       
+        map2RealRows=np.delete(map2RealRows, rows_to_delete, axis=0)
         row_indexes, col_indexes = linear_sum_assignment(cost_matrix_numpy)
         for row_index, col_index in zip(row_indexes, col_indexes):
             A_matrix[index_batch, map2RealRows[row_index], map2RealCols[col_index]]=1
