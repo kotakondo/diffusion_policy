@@ -688,7 +688,7 @@ def calculate_deep_panther_loss(batch, policy, **kwargs):
     yaw_loss_weight = kwargs.get('yaw_loss_weight')
     obs_type = kwargs.get('obs_type')
 
-    # get the observation and action    
+    # get the observation and action
     obs = batch['obs']
     acts = batch['acts']
 

@@ -79,7 +79,7 @@ def main():
     batch_size = 128                                                    # batch size
     scheduler_type = 'ddim' # 'ddpm', 'ddim' or 'dpm-multistep'         # scheduler type (ddpm/dpm-multistep)
     yaw_loss_weight = 1.0                                               # yaw loss weight
-    policy_save_freq = 10                                               # policy save frequency
+    policy_save_freq = 50                                               # policy save frequency
 
 
     # check if we use GNN and last observation type
@@ -102,10 +102,11 @@ def main():
     gnn_group = 'max'                                                   # group for gnn
 
     # default model path
-    if args.model_path is not None:
+    if model_path is not None:
         model_path = args.model_path
     else:
         model_path = save_dir + f'{en_network_type}_{de_network_type}/{en_network_type}_{de_network_type}_final.pt'
+        # model_path = save_dir + f'{en_network_type}_{de_network_type}/{en_network_type}_{de_network_type}_num_120.pt'
 
     """ ********************* DATA ********************* """
 
@@ -225,7 +226,7 @@ def main():
 
     """ ********************* LOAD MODEL ********************* """
 
-    if model_path is not None:
+    if is_evaluate_after_training:
         # load model
         print("model_path: ", model_path)
         model = th.load(model_path, map_location=device)

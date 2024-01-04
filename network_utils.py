@@ -401,7 +401,6 @@ class MLP(nn.Module):
             layers.append(mlp_activation)
             input_dim = next_dim 
         layers.append(nn.Linear(input_dim, self.output_dim*self.num_trajs))
-        layers.append(nn.Tanh())
         self.layers = nn.Sequential(*layers)
         self.tanh = nn.Tanh()
 
