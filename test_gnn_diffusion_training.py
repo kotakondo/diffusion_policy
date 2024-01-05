@@ -74,7 +74,7 @@ def main():
     obs_dim = 43                                                        # if we use GNN, this will be overwritten in Conditional REsidualBlock1D and won't be used
     action_dim = 22                                                     # 15(pos) + 6(yaw) + 1(time)
     num_diffusion_iters = 50                                            # number of diffusion iterations
-    num_epochs = 500 if not is_test_run else 1                          # number of epochs
+    num_epochs = 3000 if not is_test_run else 1                          # number of epochs
     num_eval = 10                                                       # number of evaluation data points
     batch_size = 128                                                    # batch size
     scheduler_type = 'ddim' # 'ddpm', 'ddim' or 'dpm-multistep'         # scheduler type (ddpm/dpm-multistep)
@@ -89,7 +89,7 @@ def main():
     """ ********************* NETWORK ********************* """
     # network parameters
 
-    mlp_hidden_sizes = [1024, 1024, 1024, 1024]                         # hidden sizes for mlp
+    mlp_hidden_sizes = [2048, 2048, 2048, 2048]                         # hidden sizes for mlp
     mlp_activation = nn.ReLU()                                          # activation for mlp
     lstm_hidden_size = 1024                                             # hidden size for lstm
     transformer_d_model = 43 if de_network_type == 'mlp' else 23        # d_model for transformer (43 for mlp, 1, 13, 23, 299 for diffusion)
@@ -253,7 +253,9 @@ def main():
 
     """ ********************* TEST ********************* """
 
-    # test_net(policy, dataset_test, noise_scheduler=noise_scheduler, **kwargs)
+    if is_evaluate_after_training:
+        # test model
+        test_net(policy, dataset_test, noise_scheduler=noise_scheduler, **kwargs)
 
 if __name__ == '__main__':
     main()
