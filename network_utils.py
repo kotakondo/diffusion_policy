@@ -13,6 +13,18 @@ import torch as th
 from torch_geometric.nn import HGTConv
 from torch_geometric.nn import Linear as gnn_Linear
 
+def reshape_input_for_rnn(x: th.Tensor, obst_obs_dim: int) -> th.Tensor:
+    """
+    Reshape input tensor for RNN (LSTM and Transformer)
+    """
+
+    # reshape input to (batch, num_obst, input_dim=33)
+    num_obst = x.shape[-1] // obst_obs_dim
+    output = th.zeros((x.shape[0], num_obst, obst_obs_dim))
+    for i in range(num_obst):
+        # get i-th obstacle observation
+        output[:, [i], :] = x[:, :, i*obst_obs_dim: (i+1)*obst_obs_dim]
+    return output
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
@@ -28,6 +40,7 @@ class SinusoidalPosEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
+
 class Downsample1d(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -39,11 +52,11 @@ class Downsample1d(nn.Module):
 class Upsample1d(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.conv = nn.ConvTranspose1d(dim, dim, 4, 2, 1) # not sure why but the default kernel_size was set to 4
-        # self.conv = nn.ConvTranspose1d(dim, dim, 3, 2, 1) # not sure why but the default kernel_size was set to 4
+        self.conv = nn.ConvTranspose1d(dim, dim, 4, 2, 1)
 
     def forward(self, x):
         return self.conv(x)
+
 
 class Conv1dBlock(nn.Module):
     '''
@@ -62,79 +75,15 @@ class Conv1dBlock(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+
 class ConditionalResidualBlock1D(nn.Module):
     def __init__(self,
             in_channels,
             out_channels,
             cond_dim,
-            **kwargs):
-        
+            kernel_size=3,
+            n_groups=8):
         super().__init__()
-
-        # unpack kwargs
-        kernel_size = kwargs["diffusion_kernel_size"]
-        n_groups = kwargs["diffusion_n_groups"]
-        use_gnn = kwargs["en_network_type"] == "gnn"
-        lstm_hidden_size = kwargs["lstm_hidden_size"]
-        transformer_dim_feedforward = kwargs["transformer_dim_feedforward"]
-        transformer_dropout = kwargs["transformer_dropout"]
-        gnn_hidden_channels = kwargs["gnn_hidden_channels"]
-        gnn_num_layers = kwargs["gnn_num_layers"]
-        gnn_num_heads = kwargs["gnn_num_heads"]
-        group = kwargs["gnn_group"]
-        gnn_data = kwargs["gnn_data"]
-        en_network_type = kwargs["en_network_type"]
-        mlp_hidden_sizes = kwargs["mlp_hidden_sizes"]
-        mlp_activation = kwargs["mlp_activation"]
-
-        self.use_gnn = use_gnn
-        self.gnn_data = gnn_data
-        self.gnn_hidden_channels = gnn_hidden_channels
-        self.gnn_num_layers = gnn_num_layers
-        self.gnn_num_heads = gnn_num_heads
-        self.group = group
-        self.out_channels = out_channels
-        self.en_network_type = en_network_type
-        self.mlp_hidden_sizes = mlp_hidden_sizes
-        self.mlp_activation = mlp_activation
-
-        # Use MLP for encoder
-        if self.en_network_type == "mlp":
-            linear_layer_input_dim = cond_dim
-
-        # Use LSTM for encoder
-        if self.en_network_type == "lstm":
-            self.lstm = nn.LSTM(cond_dim, lstm_hidden_size, batch_first=True)
-            linear_layer_input_dim = lstm_hidden_size
-
-        # Use Transformer for encoder
-        if self.en_network_type == "transformer":
-            transformer_nhead = 13 # 1, 13, 23, or 299
-            self.transformer = nn.TransformerEncoderLayer(d_model=cond_dim, nhead=transformer_nhead, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
-            linear_layer_input_dim = cond_dim
-
-        # Use GNN for encoder
-        if self.en_network_type == "gnn":
-            self.lin_dict = th.nn.ModuleDict()
-            for node_type in self.gnn_data.node_types:
-                self.lin_dict[node_type] = gnn_Linear(-1, self.gnn_hidden_channels)
-            # HGTConv Layers
-            self.convs = th.nn.ModuleList()
-            for _ in range(self.gnn_num_layers):
-                conv = HGTConv(self.gnn_hidden_channels, self.gnn_hidden_channels, self.gnn_data.metadata(), self.gnn_num_heads, group=self.group)
-                self.convs.append(conv)
-            linear_layer_input_dim = self.gnn_hidden_channels
-
-        # linear layers
-        layers = []
-        for next_dim in mlp_hidden_sizes:
-            layers.append(nn.Linear(linear_layer_input_dim, next_dim))
-            layers.append(mlp_activation)
-            linear_layer_input_dim = next_dim
-        layers.append(nn.Linear(linear_layer_input_dim, cond_dim))
-        layers.append(nn.Tanh())
-        self.layers = nn.Sequential(*layers)
-        self.tanh = nn.Tanh()
 
         self.blocks = nn.ModuleList([
             Conv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups),
@@ -154,11 +103,8 @@ class ConditionalResidualBlock1D(nn.Module):
         # make sure dimensions compatible
         self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
             if in_channels != out_channels else nn.Identity()
-        
-        # make it float
-        self = self.float()
 
-    def forward(self, x, cond=None, x_dict=None, edge_index_dict=None):
+    def forward(self, x, cond):
         '''
             x : [ batch_size x in_channels x horizon ]
             cond : [ batch_size x cond_dim]
@@ -166,37 +112,9 @@ class ConditionalResidualBlock1D(nn.Module):
             returns:
             out : [ batch_size x out_channels x horizon ]
         '''
-
         out = self.blocks[0](x)
-
-        # Use LSTM for encoder
-        if self.en_network_type == "lstm":
-            output, (h_n, c_n) = self.lstm(cond) # get the output
-            if len(output.shape) == 3:
-                output = output[:, -1, :]
-            else:
-                output = output[[-1], :]
-            # output = output[:, -1, :] # get the last output
-            output = self.layers(output) # pass it through the layers
-            cond = self.tanh(output) # pass it through a tanh layer
-        
-        elif self.en_network_type == "transformer":
-            output = self.transformer(cond) # get the output
-            output = self.layers(output) # pass it through the layers
-            cond = self.tanh(output) # pass it through a tanh layer
-
-        # Use GNN for encoder
-        if self.en_network_type == "gnn" and x_dict is not None and edge_index_dict is not None:
-            for node_type, x_gnn in x_dict.items():
-                x_dict[node_type] = self.lin_dict[node_type](x_gnn).relu_()
-            for conv in self.convs:
-                x_dict = conv(x_dict, edge_index_dict)
-            output = x_dict["current_state"] # extract the latent vector
-            output = self.layers(output)
-            cond = self.tanh(output) # pass it through a tanh layer
-
-        # FiLM modulation
         embed = self.cond_encoder(cond)
+
         embed = embed.reshape(
             embed.shape[0], 2, self.out_channels, 1)
         scale = embed[:,0,...]
@@ -219,18 +137,98 @@ class ConditionalUnet1D(nn.Module):
         kernel_size: Conv kernel size
         n_groups: Number of groups for GroupNorm
         """
+        super().__init__()
 
+        
         # unpack kwargs
         input_dim = kwargs["action_dim"]
         diffusion_step_embed_dim = kwargs["diffusion_step_embed_dim"]
         down_dims = kwargs["diffusion_down_dims"]
+        agent_obs_dim = kwargs["agent_obs_dim"]
+        obst_obs_dim = kwargs["obst_obs_dim"]
         kernel_size = kwargs["diffusion_kernel_size"]
-        global_cond_dim = kwargs["obs_dim"] * kwargs["obs_horizon"]
+        use_gnn = kwargs["en_network_type"] == "gnn"
+        lstm_hidden_size = kwargs["lstm_hidden_size"]
+        transformer_dim_feedforward = kwargs["transformer_dim_feedforward"]
+        transformer_dropout = kwargs["transformer_dropout"]
+        gnn_hidden_channels = kwargs["gnn_hidden_channels"]
+        gnn_num_layers = kwargs["gnn_num_layers"]
+        gnn_num_heads = kwargs["gnn_num_heads"]
+        group = kwargs["gnn_group"]
+        gnn_data = kwargs["gnn_data"]
+        en_network_type = kwargs["en_network_type"]
+        agent_obs_hidden_sizes = kwargs["agent_obs_hidden_sizes"]
+        mlp_hidden_sizes = kwargs["mlp_hidden_sizes"]
+        mlp_activation = kwargs["mlp_activation"]
+        linear_layer_output_dim = kwargs["linear_layer_output_dim"]
+        output_dim_for_agent_obs = kwargs["output_dim_for_agent_obs"]
+        transformer_nhead = kwargs["transformer_nhead"]
 
-        super().__init__()
-        all_dims = [input_dim] + list(down_dims)
-        start_dim = down_dims[0]
+        self.use_gnn = use_gnn
+        self.gnn_data = gnn_data
+        self.gnn_hidden_channels = gnn_hidden_channels
+        self.gnn_num_layers = gnn_num_layers
+        self.gnn_num_heads = gnn_num_heads
+        self.group = group
+        self.en_network_type = en_network_type
+        self.agent_obs_hidden_sizes = agent_obs_hidden_sizes
+        self.mlp_hidden_sizes = mlp_hidden_sizes
+        self.mlp_activation = mlp_activation
+        self.agent_obs_dim = agent_obs_dim
+        self.obst_obs_dim = obst_obs_dim
 
+        # Use MLP for agent observation encoder
+        layers = []
+        input_dim_for_agent_obs = self.agent_obs_dim
+        for next_dim in agent_obs_hidden_sizes:
+            layers.append(nn.Linear(input_dim_for_agent_obs, next_dim))
+            layers.append(mlp_activation)
+            input_dim_for_agent_obs = next_dim
+        layers.append(nn.Linear(input_dim_for_agent_obs, output_dim_for_agent_obs))
+        layers.append(nn.Tanh())
+        self.agent_obs_layers = nn.Sequential(*layers)
+        self.agent_obs_tanh = nn.Tanh()
+
+        # Use MLP for encoder
+        if self.en_network_type == "mlp":
+            linear_layer_input_dim = obst_obs_dim
+
+        # Use LSTM for encoder
+        if self.en_network_type == "lstm":
+            self.lstm = nn.LSTM(obst_obs_dim, lstm_hidden_size, batch_first=True)
+            linear_layer_input_dim = lstm_hidden_size
+
+        # Use Transformer for encoder
+        if self.en_network_type == "transformer":
+            # TransformerEncoderLayer won't be able to output the fixed tensor size when input's num of obst is not fixed
+            # self.transformer = nn.TransformerEncoderLayer(d_model=obst_obs_dim, nhead=transformer_nhead, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
+            self.transformer = nn.Transformer(d_model=obst_obs_dim, nhead=transformer_nhead, num_encoder_layers=4, num_decoder_layers=4, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
+            linear_layer_input_dim = obst_obs_dim
+
+        # Use GNN for encoder
+        if self.en_network_type == "gnn":
+            self.lin_dict = th.nn.ModuleDict()
+            for node_type in self.gnn_data.node_types:
+                self.lin_dict[node_type] = gnn_Linear(-1, self.gnn_hidden_channels)
+            # HGTConv Layers
+            self.convs = th.nn.ModuleList()
+            for _ in range(self.gnn_num_layers):
+                conv = HGTConv(self.gnn_hidden_channels, self.gnn_hidden_channels, self.gnn_data.metadata(), self.gnn_num_heads, group=self.group)
+                self.convs.append(conv)
+            linear_layer_input_dim = self.gnn_hidden_channels
+
+        # linear layers after obst encoder
+        layers = []
+        for next_dim in mlp_hidden_sizes:
+            layers.append(nn.Linear(linear_layer_input_dim, next_dim))
+            layers.append(mlp_activation)
+            linear_layer_input_dim = next_dim
+        layers.append(nn.Linear(linear_layer_input_dim, linear_layer_output_dim))
+        layers.append(nn.Tanh())
+        self.layers = nn.Sequential(*layers)
+        self.tanh = nn.Tanh()
+
+        #  diffusion step encoder
         dsed = diffusion_step_embed_dim
         diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed),
@@ -239,30 +237,33 @@ class ConditionalUnet1D(nn.Module):
             nn.Linear(dsed * 4, dsed),
         )
 
-        cond_dim = dsed + global_cond_dim
+        # 1D UNet
+        all_dims = [input_dim] + list(down_dims)
+        start_dim = down_dims[0]
+        cond_dim = dsed + linear_layer_output_dim + output_dim_for_agent_obs
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
         down_modules = nn.ModuleList([])
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (len(in_out) - 1)
             down_modules.append(nn.ModuleList([
-                ConditionalResidualBlock1D(dim_in, dim_out, cond_dim=cond_dim, **kwargs),
-                ConditionalResidualBlock1D(dim_out, dim_out, cond_dim=cond_dim, **kwargs),
+                ConditionalResidualBlock1D(dim_in, dim_out, cond_dim),
+                ConditionalResidualBlock1D(dim_out, dim_out, cond_dim),
                 Downsample1d(dim_out) if not is_last else nn.Identity()
             ]))
 
         mid_dim = all_dims[-1]
         self.mid_modules = nn.ModuleList([
-            ConditionalResidualBlock1D(mid_dim, mid_dim, cond_dim=cond_dim, **kwargs),
-            ConditionalResidualBlock1D(mid_dim, mid_dim, cond_dim=cond_dim, **kwargs),
+            ConditionalResidualBlock1D(mid_dim, mid_dim, cond_dim),
+            ConditionalResidualBlock1D(mid_dim, mid_dim, cond_dim),
         ])
 
         up_modules = nn.ModuleList([])
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (len(in_out) - 1)
             up_modules.append(nn.ModuleList([
-                ConditionalResidualBlock1D(dim_out*2, dim_in, cond_dim=cond_dim, **kwargs),
-                ConditionalResidualBlock1D(dim_in, dim_in, cond_dim=cond_dim, **kwargs),
+                ConditionalResidualBlock1D(dim_out*2, dim_in, cond_dim),
+                ConditionalResidualBlock1D(dim_in, dim_in, cond_dim),
                 Upsample1d(dim_in) if not is_last else nn.Identity()
             ]))
 
@@ -309,31 +310,83 @@ class ConditionalUnet1D(nn.Module):
             timesteps = timesteps[None].to(sample.device)
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         
+        # Encoder layers
+        
+        # first separate the agent observation and the obstacle observation
+        agent_obs = global_cond[:, 0, :10] # agent's observation won't change across obstacles in the same scene
+        obst_obs = global_cond[:, :, 10:]
+
+        # agent_obs goes to a separate linear layer
+        agent_obs = self.agent_obs_layers(agent_obs)
+        agent_obs = self.agent_obs_tanh(agent_obs)
+
+        # obst_obs goes to a separate encoder
+        if self.en_network_type == "mlp":
+            
+            output = self.layers(obst_obs)
+            obst_obs = self.tanh(output)
+
+        elif self.en_network_type == "lstm":
+            
+            # reshape input to (num_obst, input_dim=33)
+            obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
+            output, (h_n, c_n) = self.lstm(obst_obs) # get the output
+            if len(output.shape) == 3:
+                output = output[:, -1, :]
+            else:
+                output = output[[-1], :]
+            # output = output[:, -1, :] # get the last output
+            output = self.layers(output) # pass it through the layers
+            obst_obs = self.tanh(output) # pass it through a tanh layer
+        
+        elif self.en_network_type == "transformer":
+
+            # reshape input to (batch_size, num_obst, input_dim=43)
+            obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
+
+            output = self.transformer(src=obst_obs, tgt=obst_obs)
+            output = output[:, -1, :] # get the last output (because we want the output dim fixed)
+            output = self.layers(output) # pass it through the layers
+            obst_obs = self.tanh(output) # pass it through a tanh layer
+
+        # Use GNN for encoder
+        if self.en_network_type == "gnn" and x_dict is not None and edge_index_dict is not None:
+            for node_type, x_gnn in x_dict.items():
+                x_dict[node_type] = self.lin_dict[node_type](x_gnn).relu_()
+            for conv in self.convs:
+                x_dict = conv(x_dict, edge_index_dict)
+            output = x_dict["current_state"] # extract the latent vector
+            output = self.layers(output)
+            obst_obs = self.tanh(output) # pass it through a tanh layer
+
+        # agent_obs and obst_obs are concatenated
+        encoder_output = torch.cat((agent_obs, obst_obs), dim=-1)
+
+        # global conditioning
         timesteps = timesteps.expand(sample.shape[0])
         global_feature = self.diffusion_step_encoder(timesteps)
-
-        if global_cond is not None:
-            global_feature = torch.cat([
-                global_feature, global_cond
-            ], axis=-1)
+        global_feature = torch.cat([
+            global_feature, encoder_output
+        ], axis=-1)
 
         x = sample
         h = []
+
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
 
             # print out devices
-            x = resnet(x, global_feature, x_dict, edge_index_dict)
-            x = resnet2(x, global_feature, x_dict, edge_index_dict)
+            x = resnet(x, global_feature)
+            x = resnet2(x, global_feature)
             h.append(x)
             x = downsample(x)
 
         for mid_module in self.mid_modules:
-            x = mid_module(x, global_feature, x_dict, edge_index_dict)
+            x = mid_module(x, global_feature)
 
         for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):
             x = torch.cat((x, h.pop()), dim=1)
-            x = resnet(x, global_feature, x_dict, edge_index_dict)
-            x = resnet2(x, global_feature, x_dict, edge_index_dict)
+            x = resnet(x, global_feature)
+            x = resnet2(x, global_feature)
             x = upsample(x)
 
         x = self.final_conv(x)
@@ -352,96 +405,142 @@ class MLP(nn.Module):
         super().__init__()
 
         # unpack kwargs
-        num_trajs = kwargs["num_trajs"]
-        input_dim = kwargs["input_dim"]
-        output_dim = kwargs["output_dim"]
-        self.en_network_type = kwargs["en_network_type"]
-        mlp_hidden_sizes = kwargs["mlp_hidden_sizes"]
-        mlp_activation = kwargs["mlp_activation"]
+        self.action_dim = kwargs["action_dim"]
+        self.num_trajs = kwargs["num_trajs"]
+        agent_obs_dim = kwargs["agent_obs_dim"]
+        obst_obs_dim = kwargs["obst_obs_dim"]
+        use_gnn = kwargs["en_network_type"] == "gnn"
         lstm_hidden_size = kwargs["lstm_hidden_size"]
-        transformer_d_model = kwargs["transformer_d_model"]
-        transformer_nhead = kwargs["transformer_nhead"]
         transformer_dim_feedforward = kwargs["transformer_dim_feedforward"]
         transformer_dropout = kwargs["transformer_dropout"]
-        gnn_data = kwargs["gnn_data"]
         gnn_hidden_channels = kwargs["gnn_hidden_channels"]
         gnn_num_layers = kwargs["gnn_num_layers"]
         gnn_num_heads = kwargs["gnn_num_heads"]
-        gnn_group = kwargs["gnn_group"]
+        group = kwargs["gnn_group"]
+        gnn_data = kwargs["gnn_data"]
+        en_network_type = kwargs["en_network_type"]
+        agent_obs_hidden_sizes = kwargs["agent_obs_hidden_sizes"]
+        mlp_hidden_sizes = kwargs["mlp_hidden_sizes"]
+        mlp_activation = kwargs["mlp_activation"]
+        output_dim_for_agent_obs = kwargs["output_dim_for_agent_obs"]
+        transformer_nhead = kwargs["transformer_nhead"]
 
-        self.num_trajs = num_trajs
-        self.output_dim = output_dim
-        
-        # create a list of layers
+        self.use_gnn = use_gnn
+        self.gnn_data = gnn_data
+        self.gnn_hidden_channels = gnn_hidden_channels
+        self.gnn_num_layers = gnn_num_layers
+        self.gnn_num_heads = gnn_num_heads
+        self.group = group
+        self.en_network_type = en_network_type
+        self.agent_obs_hidden_sizes = agent_obs_hidden_sizes
+        self.mlp_hidden_sizes = mlp_hidden_sizes
+        self.mlp_activation = mlp_activation
+        self.agent_obs_dim = agent_obs_dim
+        self.obst_obs_dim = obst_obs_dim
 
+        # Use MLP for agent observation encoder
+        layers = []
+        input_dim_for_agent_obs = self.agent_obs_dim
+        for next_dim in agent_obs_hidden_sizes:
+            layers.append(nn.Linear(input_dim_for_agent_obs, next_dim))
+            layers.append(mlp_activation)
+            input_dim_for_agent_obs = next_dim
+        layers.append(nn.Linear(input_dim_for_agent_obs, output_dim_for_agent_obs))
+        layers.append(nn.Tanh())
+        self.agent_obs_layers = nn.Sequential(*layers)
+        self.agent_obs_tanh = nn.Tanh()
+
+        # Use MLP for encoder
+        if self.en_network_type == "mlp":
+            linear_layer_input_dim = obst_obs_dim
+
+        # Use LSTM for encoder
         if self.en_network_type == "lstm":
-            self.lstm = nn.LSTM(input_dim, lstm_hidden_size, batch_first=True)
-            input_dim = lstm_hidden_size
-        
-        elif self.en_network_type == "transformer":
-            self.transformer = nn.TransformerEncoderLayer(d_model=transformer_d_model, nhead=transformer_nhead, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
-            input_dim = transformer_d_model
+            self.lstm = nn.LSTM(obst_obs_dim, lstm_hidden_size, batch_first=True)
+            linear_layer_input_dim = lstm_hidden_size
 
-        elif self.en_network_type == "gnn":
+        # Use Transformer for encoder
+        if self.en_network_type == "transformer":
+            # TransformerEncoderLayer won't be able to output the fixed tensor size when input's num of obst is not fixed
+            # self.transformer = nn.TransformerEncoderLayer(d_model=obst_obs_dim, nhead=transformer_nhead, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
+            self.transformer = nn.Transformer(d_model=obst_obs_dim, nhead=transformer_nhead, num_encoder_layers=4, num_decoder_layers=4, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
+            linear_layer_input_dim = obst_obs_dim
 
+        # Use GNN for encoder
+        if self.en_network_type == "gnn":
             self.lin_dict = th.nn.ModuleDict()
-            for node_type in gnn_data.node_types:
-                self.lin_dict[node_type] = gnn_Linear(-1, gnn_hidden_channels)
-
+            for node_type in self.gnn_data.node_types:
+                self.lin_dict[node_type] = gnn_Linear(-1, self.gnn_hidden_channels)
             # HGTConv Layers
             self.convs = th.nn.ModuleList()
-            for _ in range(gnn_num_layers):
-                conv = HGTConv(gnn_hidden_channels, gnn_hidden_channels, gnn_data.metadata(), gnn_num_heads, group=gnn_group)
+            for _ in range(self.gnn_num_layers):
+                conv = HGTConv(self.gnn_hidden_channels, self.gnn_hidden_channels, self.gnn_data.metadata(), self.gnn_num_heads, group=self.group)
                 self.convs.append(conv)
-            input_dim = gnn_hidden_channels
+            linear_layer_input_dim = self.gnn_hidden_channels
 
+        # linear layers after obst encoder
         layers = []
         for next_dim in mlp_hidden_sizes:
-            layers.append(nn.Linear(input_dim, next_dim))
+            layers.append(nn.Linear(linear_layer_input_dim, next_dim))
             layers.append(mlp_activation)
-            input_dim = next_dim 
-        layers.append(nn.Linear(input_dim, self.output_dim*self.num_trajs))
+            linear_layer_input_dim = next_dim
+        layers.append(nn.Linear(linear_layer_input_dim, self.num_trajs*self.action_dim - output_dim_for_agent_obs))
+        layers.append(nn.Tanh())
         self.layers = nn.Sequential(*layers)
         self.tanh = nn.Tanh()
 
     def forward(self, x: th.Tensor, x_dict=None, edge_index_dict=None) -> th.Tensor:
 
-        if self.en_network_type == "mlp":
-
-            batch_size = x.shape[0]
-            output = self.layers(x)
-            output = self.tanh(output) # pass it through a tanh layer
-            output = output.reshape(batch_size, self.num_trajs, self.output_dim) # reshape output to (batch_size, num_trajs, output_dim)
+        # Encoder layers
         
-        elif self.en_network_type == "lstm":
+        # first separate the agent observation and the obstacle observation
+        agent_obs = x[:, [0], :self.agent_obs_dim] # agent's observation won't change across obstacles in the same scene
+        obst_obs = x[:, :, self.agent_obs_dim:]
 
-            output, (h_n, c_n) = self.lstm(x) # get the output
-            if len(output.shape) == 3:
-                output = output[:, -1, :]
-            else:
-                output = output[[-1], :]
+        # agent_obs goes to a separate linear layer
+        agent_obs = self.agent_obs_layers(agent_obs)
+        agent_obs = self.agent_obs_tanh(agent_obs)
+
+        # obst_obs goes to a separate encoder
+        if self.en_network_type == "mlp":
+            
+            output = self.layers(obst_obs)
+            obst_obs = self.tanh(output)
+
+        elif self.en_network_type == "lstm":
+            
+            # reshape input to (num_obst, input_dim=33)
+            obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
+            output, (h_n, c_n) = self.lstm(obst_obs) # get the output
+            output = output[:, [-1], :]
             output = self.layers(output) # pass it through the layers
-            output = self.tanh(output) # pass it through a tanh layer
-            output = output.reshape(output.shape[0], self.num_trajs, self.output_dim) # reshape output to (batch_size, num_trajs, output_dim)
+            obst_obs = self.tanh(output) # pass it through a tanh layer
         
         elif self.en_network_type == "transformer":
 
-            output = self.transformer(x) # get the output
+            # reshape input to (batch_size, num_obst, input_dim=43)
+            obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
+
+            output = self.transformer(src=obst_obs, tgt=obst_obs)
+            output = output[:, [-1], :] # get the last output (because we want the output dim fixed)
             output = self.layers(output) # pass it through the layers
-            output = self.tanh(output) # pass it through a tanh layer
-            output = output.reshape(output.shape[0], self.num_trajs, self.output_dim) # reshape output to (batch_size, num_trajs, output_dim)
+            obst_obs = self.tanh(output) # pass it through a tanh layer
 
-        elif self.en_network_type == "gnn":
-
+        # Use GNN for encoder
+        if self.en_network_type == "gnn" and x_dict is not None and edge_index_dict is not None:
             for node_type, x_gnn in x_dict.items():
                 x_dict[node_type] = self.lin_dict[node_type](x_gnn).relu_()
-
             for conv in self.convs:
                 x_dict = conv(x_dict, edge_index_dict)
-
             output = x_dict["current_state"] # extract the latent vector
-            output = self.layers(output) # pass it through the layers
-            output = self.tanh(output)
-            output = output.reshape(output.shape[0], self.num_trajs, self.output_dim)
+            output = self.layers(output)
+            obst_obs = self.tanh(output) # pass it through a tanh layer
+            obst_obs = obst_obs.unsqueeze(1)
+
+        # agent_obs and obst_obs are concatenated
+        output = torch.cat((agent_obs, obst_obs), dim=-1)
+
+        # (B, num_traj, action_dim)
+        output = output.reshape(output.shape[0], self.num_trajs, self.action_dim)
 
         return output

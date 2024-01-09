@@ -6,9 +6,8 @@ import argparse
 import torch.nn as nn
 
 # network utils import
-from utils import create_dataset, str2bool, setup_diffusion, visualize
+from utils import create_dataset, str2bool, setup_diffusion, visualize, get_dataloader_training
 from network_utils import MLP
-from torch_geometric.loader import DataLoader as GNNDataLoader
 
 # training utils import
 from training_utils import train_diffusion_model, train_non_diffusion_model, test_net
@@ -29,13 +28,14 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--machine', default='jtorde', help='machine', type=str)
-    parser.add_argument('-d', '--data-dir', default='/media/jtorde/T7/gdp/evals-dir/evals4/tmp_dagger/2/demos/', help='directory', type=str)
+    parser.add_argument('-d', '--data-dir', default='/media/jtorde/T7/gdp/evals-dir/evals5/tmp_dagger/2/demos/', help='directory', type=str)
     parser.add_argument('-s', '--save-dir', default='/media/jtorde/T7/gdp/models/', help='save directory', type=str)
     parser.add_argument('-t', '--test', default=False, help='test (small dataset)', type=str2bool)
     parser.add_argument('-en', '--en-network-type', default='mlp', help='encoder network type (/mlp/lstm/transformer/gnn)', type=str)
     parser.add_argument('-de', '--de-network-type', default='mlp', help='encoder network type (diffusion/mlp)', type=str)
     parser.add_argument('-o', '--observation-type', default='last', help='observation type (history/last)', type=str)
     parser.add_argument('-v', '--visualize', default=False, help='visualize', type=str2bool)
+    parser.add_argument('-u', '--use-rl', default=False, help='use rl', type=str2bool)
     parser.add_argument('--evaluate-after-training', default=False, help='evaluate after training', type=str2bool)
     parser.add_argument('--train-model', default=True, help='train model', type=str2bool)
     parser.add_argument('--model-path', default=None, help='model path', type=str)
@@ -65,21 +65,32 @@ def main():
     device = th.device('cpu') #if not use_gnn else th.device('cuda')    # if we use gnn, we need to use cpu (this is because we use shuffle and worker processes in dataloader)
     th.set_default_device(device)                                       # set default device                                   
     th.set_default_dtype(th.float32)                                    # set default dtype
-    max_num_training_demos = 10_000 if not is_test_run else 100         # max number of training demonstrations
+    max_num_training_demos = 10_000 if not is_test_run else 8           # max number of training demonstrations
     percentage_training = 0.8                                           # percentage of training demonstrations
     percentage_eval = 0.1                                               # percentage of evaluation demonstrations
     percentage_test = 0.1                                               # percentage of test demonstrations
     num_trajs = 8  # in diffusion model it has to be a multiple of 2    # num_trajs to predict
     obs_horizon = 1                                                     # TODO remove (from diffuion policy paper)
-    obs_dim = 43                                                        # if we use GNN, this will be overwritten in Conditional REsidualBlock1D and won't be used
+    obs_dim = 43                                                        # if we use GNN, this will be overwritten in Conditional ResidualBlock1D and won't be used
+    agent_obs_dim = 10                                                  
+    obst_obs_dim = 33
+    output_dim_for_agent_obs = 64                                       # output dim for agent obs
     action_dim = 22                                                     # 15(pos) + 6(yaw) + 1(time)
     num_diffusion_iters = 50                                            # number of diffusion iterations
-    num_epochs = 3000 if not is_test_run else 1                          # number of epochs
+    num_epochs = 3000 if not is_test_run else 5                         # number of epochs
     num_eval = 10                                                       # number of evaluation data points
-    batch_size = 128                                                    # batch size
+    batch_size = 128 if not is_test_run else 4                          # batch size
     scheduler_type = 'ddim' # 'ddpm', 'ddim' or 'dpm-multistep'         # scheduler type (ddpm/dpm-multistep)
     yaw_loss_weight = 1.0                                               # yaw loss weight
     policy_save_freq = 50                                               # policy save frequency
+    use_rl = False                                                       # use rl?
+    clip_for_rl = 1e-4                                                  # clip for rl
+    adv_clip_for_rl = 10.0                                              # reward clip for rl
+    use_reinforce_for_rl = True                                         # use REINFORCE for rl
+    use_importance_sampling_for_rl = False                              # use importance sampling for rl
+
+    # sanity check
+    assert not (use_reinforce_for_rl and use_importance_sampling_for_rl), "use_reinforce_for_rl and use_importance_sampling_for_rl cannot be both True"
 
 
     # check if we use GNN and last observation type
@@ -90,23 +101,36 @@ def main():
     # network parameters
 
     mlp_hidden_sizes = [2048, 2048, 2048, 2048]                         # hidden sizes for mlp
+    # mlp_hidden_sizes = [1024, 1024]                                   # hidden sizes for mlp
+
+    # if de_network_type == 'mlp':
+    #     if en_network_type == 'lstm':
+    #         mlp_hidden_sizes = [1024, 1024]
+    #     else:
+    #         mlp_hidden_sizes = [2048, 2048, 2048, 2048]
+    # elif de_network_type == 'diffusion':
+    #     mlp_hidden_sizes = [1024, 1024]
+
+    agent_obs_hidden_sizes = [256, 256, 256, 256]                       # hidden sizes for agent obs
     mlp_activation = nn.ReLU()                                          # activation for mlp
     lstm_hidden_size = 1024                                             # hidden size for lstm
     transformer_d_model = 43 if de_network_type == 'mlp' else 23        # d_model for transformer (43 for mlp, 1, 13, 23, 299 for diffusion)
     transformer_nhead = 43 if de_network_type == 'mlp' else 23          # nhead for transformer (43 for mlp, 1, 13, 23, 299 for diffusion)
     transformer_dim_feedforward = 1024                                  # feedforward_dim for transformer
     transformer_dropout = 0.1                                           # dropout for transformer
+    transformer_nhead = 3 # 1, 3, 11, 33                                # nhead for transformer
     gnn_hidden_channels = 1024                                          # hidden_channels for gnn
     gnn_num_layers = 4                                                  # num_layers for gnn
     gnn_num_heads = 4                                                   # num_heads for gnn
     gnn_group = 'max'                                                   # group for gnn
+    linear_layer_output_dim = 256                                       # output dim for linear layer
 
     # default model path
     if model_path is not None:
         model_path = args.model_path
     else:
-        model_path = save_dir + f'{en_network_type}_{de_network_type}/{en_network_type}_{de_network_type}_final.pt'
-        # model_path = save_dir + f'{en_network_type}_{de_network_type}/{en_network_type}_{de_network_type}_num_120.pt'
+        model_path = save_dir + f'{en_network_type}_{de_network_type}/{en_network_type}_{de_network_type}_final.pth'
+        # model_path = save_dir + f'{en_network_type}_{de_network_type}/{en_network_type}_{de_network_type}_num_120.pth'
 
     """ ********************* DATA ********************* """
 
@@ -127,6 +151,8 @@ def main():
         'num_trajs': num_trajs,
         'obs_horizon': obs_horizon,
         'obs_dim': obs_dim,
+        'agent_obs_dim': agent_obs_dim,
+        'obst_obs_dim': obst_obs_dim,
         'action_dim': action_dim,
         'num_diffusion_iters': num_diffusion_iters,
         'num_epochs': num_epochs,
@@ -139,6 +165,7 @@ def main():
         'input_dim': obs_dim,
         'output_dim': action_dim,
         'en_network_type': en_network_type,
+        'agent_obs_hidden_sizes': agent_obs_hidden_sizes,
         'mlp_hidden_sizes': mlp_hidden_sizes,
         'mlp_activation': mlp_activation,
         'lstm_hidden_size': lstm_hidden_size,
@@ -156,6 +183,13 @@ def main():
         'diffusion_n_groups': 8,
         'machine': args.machine,
         'policy_save_freq': policy_save_freq,
+        'use_rl': use_rl,
+        'clip_for_rl': clip_for_rl,
+        'adv_clip_for_rl': adv_clip_for_rl,
+        'use_reinforce_for_rl': use_reinforce_for_rl,
+        'use_importance_sampling_for_rl': use_importance_sampling_for_rl,
+        'linear_layer_output_dim': linear_layer_output_dim,
+        'output_dim_for_agent_obs': output_dim_for_agent_obs,
     }
 
     # create dataset
@@ -165,32 +199,7 @@ def main():
     kwargs['gnn_data'] = dataset_training[0]
 
     # create dataloader for training
-    if en_network_type == 'gnn':
-        # create dataloader for GNN
-        dataloader_training = GNNDataLoader(
-            dataset_training,
-            batch_size=batch_size,                                      # if batch_size is less than 256, then CPU is faster than GPU on my computer
-            shuffle=False if str(device)=='cuda' else True,             # shuffle True causes error Expected a 'cuda' str(device) type for generator but found 'cpu' https://github.com/dbolya/yolact/issues/664#issuecomment-878241658
-            num_workers=0 if str(device)=='cuda' else 16 ,              # if we wanna use cuda, need to set num_workers=0
-            pin_memory=False if str(device)=='cuda' else True,          # accelerate cpu-gpu transfer
-            persistent_workers=False if str(device)=='cuda' else True,  # if we wanna use cuda, need to set False
-        )
-    elif device == th.device('cpu'):
-        dataloader_training = th.utils.data.DataLoader(
-            dataset_training,
-            batch_size=batch_size,
-            num_workers=16,
-            shuffle=True,
-            # accelerate cpu-gpu transfer
-            pin_memory=True,
-            # don't kill worker process afte each epoch
-            persistent_workers=True
-        )
-    else:
-        dataloader_training = th.utils.data.DataLoader(
-            dataset_training,
-            batch_size=batch_size,
-        )
+    dataloader_training = get_dataloader_training(dataset_training, **kwargs)
 
     # create datasets_loader for data parameters
     datasets_loader = {
@@ -214,9 +223,9 @@ def main():
         policy.eval()
         # you need to run policy to initialize the network
         if en_network_type == 'gnn':
-            policy(th.zeros(1, obs_dim), x_dict=dataset_training[0].x_dict, edge_index_dict=dataset_training[0].edge_index_dict)
+            policy(th.zeros(1, 1, obs_dim), x_dict=dataset_training[0].x_dict, edge_index_dict=dataset_training[0].edge_index_dict)
         else:
-            policy(th.zeros(1, obs_dim))
+            policy(th.zeros(1, 1, obs_dim))
 
     else:
         raise NotImplementedError
@@ -226,7 +235,7 @@ def main():
 
     """ ********************* LOAD MODEL ********************* """
 
-    if is_evaluate_after_training:
+    if is_evaluate_after_training or use_rl:
         # load model
         print("model_path: ", model_path)
         model = th.load(model_path, map_location=device)

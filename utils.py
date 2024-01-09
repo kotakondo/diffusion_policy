@@ -16,9 +16,11 @@ from torch.utils.data import Dataset
 
 # gnn import
 from torch_geometric.data import HeteroData
+from torch_geometric.loader import DataLoader as GNNDataLoader
 
 # visualization import
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 # from compression.utils.other import ObservationManager, ActionManager, getZeroState
 
 # calculate loss
@@ -34,13 +36,59 @@ class DictDataset(Dataset):
     def __init__(self, obs, acts):
         self.obs = obs
         self.acts = acts
-        
+        self.reward = None
+
     def __getitem__(self, index):
-        return {'obs': self.obs[index], 'acts': self.acts[index]}
+        if self.reward is None:
+            return {'obs': self.obs[index], 'acts': self.acts[index]}
+        else:
+            return {'obs': self.obs[index], 'acts': self.acts[index], 'reward': self.reward[index]}
     
     def __len__(self):
         return len(self.obs)
+    
+    def add_reward(self, reward):
+        self.reward = reward
 
+def get_dataloader_training(dataset_training, **kwargs):
+
+    """
+    This function generates a dataloader for training
+    """
+
+    # unpack kwargs
+    batch_size = kwargs.get('batch_size')
+    en_network_type = kwargs.get('en_network_type')
+    device = kwargs.get('device')
+
+    if en_network_type == 'gnn':
+        # create dataloader for GNN
+        dataloader_training = GNNDataLoader(
+            dataset_training,
+            batch_size=batch_size,                                      # if batch_size is less than 256, then CPU is faster than GPU on my computer
+            shuffle=False if str(device)=='cuda' else True,             # shuffle True causes error Expected a 'cuda' str(device) type for generator but found 'cpu' https://github.com/dbolya/yolact/issues/664#issuecomment-878241658
+            num_workers=0 if str(device)=='cuda' else 16 ,              # if we wanna use cuda, need to set num_workers=0
+            pin_memory=False if str(device)=='cuda' else True,          # accelerate cpu-gpu transfer
+            persistent_workers=False if str(device)=='cuda' else True,  # if we wanna use cuda, need to set False
+        )
+    elif device == th.device('cpu'):
+        dataloader_training = th.utils.data.DataLoader(
+            dataset_training,
+            batch_size=batch_size,
+            num_workers=16,
+            shuffle=True,
+            # accelerate cpu-gpu transfer
+            pin_memory=True,
+            # don't kill worker process afte each epoch
+            persistent_workers=True
+        )
+    else:
+        dataloader_training = th.utils.data.DataLoader(
+            dataset_training,
+            batch_size=batch_size,
+        )
+
+    return dataloader_training
 
 def str2bool(v):
     """
@@ -75,7 +123,7 @@ def setup_diffusion(**kwargs):
 
     # example inputs
     noised_action = torch.randn((1, num_trajs, action_dim)).to(device)
-    obs = torch.zeros((1, obs_horizon, obs_dim)).to(device)
+    obs = torch.zeros((1, 1, obs_dim)).to(device)
 
     # naction's num_trajs needs to be a multiple of 2 so let's make it 8 for now
     # noised_action = noised_action[:, :8, :] # (B, num_trajs, action_dim)
@@ -93,7 +141,7 @@ def setup_diffusion(**kwargs):
     _ = policy(
         sample=noised_action,
         timestep=diffusion_iter,
-        global_cond=obs.flatten(start_dim=1),
+        global_cond=obs,
         x_dict=x_dict,
         edge_index_dict=edge_index_dict)
 
@@ -420,10 +468,10 @@ def get_nactions(policy, noise_scheduler, dataset, is_visualize=False, **kwargs)
     num_data_to_load = min(len(dataset), num_eval)
 
     # loop over the dataset
-    print("start denoising...")
+    print("start denoising in get_nactions")
     expert_actions, nactions, nobses, times = [], [], [], []
-    # for dataset_idx in tqdm(range(num_data_to_load), desc="data idx"):
-    for dataset_idx in range(num_data_to_load):
+
+    for dataset_idx in tqdm(range(num_data_to_load), desc="dataset idx in denoising", leave=False):
 
         # stack the last obs_horizon (2) number of observations
         nobs = dataset[dataset_idx].obs if use_gnn else dataset[dataset_idx]['obs'] # (B, global_cond_dim)
@@ -434,7 +482,6 @@ def get_nactions(policy, noise_scheduler, dataset, is_visualize=False, **kwargs)
 
             # reshape observation to (B,obs_horizon*obs_dim)
             obs_cond = nobs.unsqueeze(0).flatten(start_dim=1)
-
             # initialize action from Guassian noise
             noisy_action = torch.randn(
                 (B, num_trajs, action_dim), device=device)
@@ -445,7 +492,6 @@ def get_nactions(policy, noise_scheduler, dataset, is_visualize=False, **kwargs)
 
             # start timer
             start_time = time.time()
-
             # for k in tqdm(noise_scheduler.timesteps, desc="diffusion iter k"):
             for k in noise_scheduler.timesteps:
                 # predict noise
@@ -490,7 +536,7 @@ def get_nactions(policy, noise_scheduler, dataset, is_visualize=False, **kwargs)
             visualize_trajectory(expert_action.cpu().numpy(), naction.squeeze(0).cpu().numpy(), nobs, dataset_idx)
 
     if not is_visualize: # used get_nactions used in evaluation
-        return expert_actions, nactions, nobses
+        return expert_actions, nactions, nobses, np.mean(times)
 
 def plot_obstacles(start_state, f_obs, ax):
 
