@@ -313,7 +313,7 @@ class ConditionalUnet1D(nn.Module):
         # Encoder layers
         
         # first separate the agent observation and the obstacle observation
-        agent_obs = global_cond[:, 0, :10] # agent's observation won't change across obstacles in the same scene
+        agent_obs = global_cond[:, [0], :10] # agent's observation won't change across obstacles in the same scene
         obst_obs = global_cond[:, :, 10:]
 
         # agent_obs goes to a separate linear layer
@@ -361,6 +361,7 @@ class ConditionalUnet1D(nn.Module):
 
         # agent_obs and obst_obs are concatenated
         encoder_output = torch.cat((agent_obs, obst_obs), dim=-1)
+        encoder_output = encoder_output.squeeze(1)
 
         # global conditioning
         timesteps = timesteps.expand(sample.shape[0])

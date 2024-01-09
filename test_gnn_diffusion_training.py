@@ -77,7 +77,7 @@ def main():
     output_dim_for_agent_obs = 64                                       # output dim for agent obs
     action_dim = 22                                                     # 15(pos) + 6(yaw) + 1(time)
     num_diffusion_iters = 50                                            # number of diffusion iterations
-    num_epochs = 3000 if not is_test_run else 5                         # number of epochs
+    num_epochs = 500 if not is_test_run else 5                          # number of epochs
     num_eval = 10                                                       # number of evaluation data points
     batch_size = 128 if not is_test_run else 4                          # batch size
     scheduler_type = 'ddim' # 'ddpm', 'ddim' or 'dpm-multistep'         # scheduler type (ddpm/dpm-multistep)
