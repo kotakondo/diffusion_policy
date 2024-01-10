@@ -187,7 +187,6 @@ class ConditionalUnet1D(nn.Module):
         layers.append(nn.Linear(input_dim_for_agent_obs, output_dim_for_agent_obs))
         layers.append(nn.Tanh())
         self.agent_obs_layers = nn.Sequential(*layers)
-        self.agent_obs_tanh = nn.Tanh()
 
         # Use MLP for encoder
         if self.en_network_type == "mlp":
@@ -226,7 +225,6 @@ class ConditionalUnet1D(nn.Module):
         layers.append(nn.Linear(linear_layer_input_dim, linear_layer_output_dim))
         layers.append(nn.Tanh())
         self.layers = nn.Sequential(*layers)
-        self.tanh = nn.Tanh()
 
         #  diffusion step encoder
         dsed = diffusion_step_embed_dim
@@ -318,13 +316,11 @@ class ConditionalUnet1D(nn.Module):
 
         # agent_obs goes to a separate linear layer
         agent_obs = self.agent_obs_layers(agent_obs)
-        agent_obs = self.agent_obs_tanh(agent_obs)
 
         # obst_obs goes to a separate encoder
         if self.en_network_type == "mlp":
             
-            output = self.layers(obst_obs)
-            obst_obs = self.tanh(output)
+            obst_obs = self.layers(obst_obs)
 
         elif self.en_network_type == "lstm":
             
@@ -336,8 +332,7 @@ class ConditionalUnet1D(nn.Module):
             else:
                 output = output[[-1], :]
             # output = output[:, -1, :] # get the last output
-            output = self.layers(output) # pass it through the layers
-            obst_obs = self.tanh(output) # pass it through a tanh layer
+            obst_obs = self.layers(output) # pass it through the layers
         
         elif self.en_network_type == "transformer":
 
@@ -345,9 +340,8 @@ class ConditionalUnet1D(nn.Module):
             obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
 
             output = self.transformer(src=obst_obs, tgt=obst_obs)
-            output = output[:, -1, :] # get the last output (because we want the output dim fixed)
-            output = self.layers(output) # pass it through the layers
-            obst_obs = self.tanh(output) # pass it through a tanh layer
+            output = output[:, [-1], :] # get the last output (because we want the output dim fixed)
+            obst_obs = self.layers(output) # pass it through the layers
 
         # Use GNN for encoder
         if self.en_network_type == "gnn" and x_dict is not None and edge_index_dict is not None:
@@ -356,8 +350,7 @@ class ConditionalUnet1D(nn.Module):
             for conv in self.convs:
                 x_dict = conv(x_dict, edge_index_dict)
             output = x_dict["current_state"] # extract the latent vector
-            output = self.layers(output)
-            obst_obs = self.tanh(output) # pass it through a tanh layer
+            obst_obs = self.layers(output)
 
         # agent_obs and obst_obs are concatenated
         encoder_output = torch.cat((agent_obs, obst_obs), dim=-1)
@@ -449,7 +442,6 @@ class MLP(nn.Module):
         layers.append(nn.Linear(input_dim_for_agent_obs, output_dim_for_agent_obs))
         layers.append(nn.Tanh())
         self.agent_obs_layers = nn.Sequential(*layers)
-        self.agent_obs_tanh = nn.Tanh()
 
         # Use MLP for encoder
         if self.en_network_type == "mlp":
@@ -488,7 +480,6 @@ class MLP(nn.Module):
         layers.append(nn.Linear(linear_layer_input_dim, self.num_trajs*self.action_dim - output_dim_for_agent_obs))
         layers.append(nn.Tanh())
         self.layers = nn.Sequential(*layers)
-        self.tanh = nn.Tanh()
 
     def forward(self, x: th.Tensor, x_dict=None, edge_index_dict=None) -> th.Tensor:
 
@@ -500,13 +491,11 @@ class MLP(nn.Module):
 
         # agent_obs goes to a separate linear layer
         agent_obs = self.agent_obs_layers(agent_obs)
-        agent_obs = self.agent_obs_tanh(agent_obs)
 
         # obst_obs goes to a separate encoder
         if self.en_network_type == "mlp":
             
-            output = self.layers(obst_obs)
-            obst_obs = self.tanh(output)
+            obst_obs = self.layers(obst_obs)
 
         elif self.en_network_type == "lstm":
             
@@ -514,8 +503,7 @@ class MLP(nn.Module):
             obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
             output, (h_n, c_n) = self.lstm(obst_obs) # get the output
             output = output[:, [-1], :]
-            output = self.layers(output) # pass it through the layers
-            obst_obs = self.tanh(output) # pass it through a tanh layer
+            obst_obs = self.layers(output) # pass it through the layers
         
         elif self.en_network_type == "transformer":
 
@@ -524,8 +512,7 @@ class MLP(nn.Module):
 
             output = self.transformer(src=obst_obs, tgt=obst_obs)
             output = output[:, [-1], :] # get the last output (because we want the output dim fixed)
-            output = self.layers(output) # pass it through the layers
-            obst_obs = self.tanh(output) # pass it through a tanh layer
+            obst_obs = self.layers(output) # pass it through the layers
 
         # Use GNN for encoder
         if self.en_network_type == "gnn" and x_dict is not None and edge_index_dict is not None:
@@ -534,8 +521,7 @@ class MLP(nn.Module):
             for conv in self.convs:
                 x_dict = conv(x_dict, edge_index_dict)
             output = x_dict["current_state"] # extract the latent vector
-            output = self.layers(output)
-            obst_obs = self.tanh(output) # pass it through a tanh layer
+            obst_obs = self.layers(output)
             obst_obs = obst_obs.unsqueeze(1)
 
         # agent_obs and obst_obs are concatenated

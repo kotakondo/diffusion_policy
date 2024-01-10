@@ -560,47 +560,47 @@ def train_loop_diffusion_model_with_rl(policy, optimizer, lr_scheduler, noise_sc
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
 
-            if machine == 'jtorde': # if it's my desktop, then evaluate on the whole dataset
-                # each epoch, we evaluate the model on evaluation data
-                costs = evaluate_diffusion_model(dataset_eval, policy, noise_scheduler, **kwargs)
-                # unpack
-                avg_cost_expert_eval, avg_obst_avoidance_violation_expert_eval, avg_dyn_lim_violation_expert_eval, avg_augmented_cost_expert_eval, \
-                min_cost_expert_eval, min_obst_avoidance_violation_expert_eval, min_dyn_lim_violation_expert_eval, min_augmented_cost_expert_eval, \
-                avg_cost_student_eval, avg_obst_avoidance_violation_student_eval, avg_dyn_lim_violation_student_eval, avg_augmented_cost_student_eval, \
-                min_cost_student_eval, min_obst_avoidance_violation_student_eval, min_dyn_lim_violation_student_eval, min_augmented_cost_student_eval, \
-                computation_time = costs
+            # if machine == 'jtorde': # if it's my desktop, then evaluate on the whole dataset
+            #     # each epoch, we evaluate the model on evaluation data
+            #     costs = evaluate_diffusion_model(dataset_eval, policy, noise_scheduler, **kwargs)
+            #     # unpack
+            #     avg_cost_expert_eval, avg_obst_avoidance_violation_expert_eval, avg_dyn_lim_violation_expert_eval, avg_augmented_cost_expert_eval, \
+            #     min_cost_expert_eval, min_obst_avoidance_violation_expert_eval, min_dyn_lim_violation_expert_eval, min_augmented_cost_expert_eval, \
+            #     avg_cost_student_eval, avg_obst_avoidance_violation_student_eval, avg_dyn_lim_violation_student_eval, avg_augmented_cost_student_eval, \
+            #     min_cost_student_eval, min_obst_avoidance_violation_student_eval, min_dyn_lim_violation_student_eval, min_augmented_cost_student_eval, \
+            #     computation_time = costs
 
-                # each epoch we evaluate the model on training data too (to check overfitting)
-                costs = evaluate_diffusion_model(dataset_training, policy, noise_scheduler, **kwargs)
-                # unpack
-                avg_cost_expert_training, avg_obst_avoidance_violation_expert_training, avg_dyn_lim_violation_expert_training, avg_augmented_cost_expert_training, \
-                min_cost_expert_training, min_obst_avoidance_violation_expert_training, min_dyn_lim_violation_expert_training, min_augmented_cost_expert_training, \
-                avg_cost_student_training, avg_obst_avoidance_violation_student_training, avg_dyn_lim_violation_student_training, avg_augmented_cost_student_training, \
-                min_cost_student_training, min_obst_avoidance_violation_student_training, min_dyn_lim_violation_student_training, min_augmented_cost_student_training, \
-                computation_time = costs
+            #     # each epoch we evaluate the model on training data too (to check overfitting)
+            #     costs = evaluate_diffusion_model(dataset_training, policy, noise_scheduler, **kwargs)
+            #     # unpack
+            #     avg_cost_expert_training, avg_obst_avoidance_violation_expert_training, avg_dyn_lim_violation_expert_training, avg_augmented_cost_expert_training, \
+            #     min_cost_expert_training, min_obst_avoidance_violation_expert_training, min_dyn_lim_violation_expert_training, min_augmented_cost_expert_training, \
+            #     avg_cost_student_training, avg_obst_avoidance_violation_student_training, avg_dyn_lim_violation_student_training, avg_augmented_cost_student_training, \
+            #     min_cost_student_training, min_obst_avoidance_violation_student_training, min_dyn_lim_violation_student_training, min_augmented_cost_student_training, \
+            #     computation_time = costs
 
-                # wandb logging
-                wandb.log({
-                    'min_cost_expert_eval': min_cost_expert_eval,
-                    'avg_cost_expert_eval': avg_cost_expert_eval,
-                    'min_cost_student_eval': min_cost_student_eval,
-                    'avg_cost_student_eval': avg_cost_student_eval,
-                    'min_cost_expert_training': min_cost_expert_training,
-                    'avg_cost_expert_training': avg_cost_expert_training,
-                    'min_cost_student_training': min_cost_student_training,
-                    'avg_cost_student_training': avg_cost_student_training,
-                    'computation_time': computation_time,
-                    'epoch': epoch_idx
-                })
+            #     # wandb logging
+            #     wandb.log({
+            #         'min_cost_expert_eval': min_cost_expert_eval,
+            #         'avg_cost_expert_eval': avg_cost_expert_eval,
+            #         'min_cost_student_eval': min_cost_student_eval,
+            #         'avg_cost_student_eval': avg_cost_student_eval,
+            #         'min_cost_expert_training': min_cost_expert_training,
+            #         'avg_cost_expert_training': avg_cost_expert_training,
+            #         'min_cost_student_training': min_cost_student_training,
+            #         'avg_cost_student_training': avg_cost_student_training,
+            #         'computation_time': computation_time,
+            #         'epoch': epoch_idx
+            #     })
                 
-                # terminate conditions
-                # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
-                if epoch_counter >= num_epochs and avg_augmented_cost_expert_eval < avg_augmented_cost_student_eval:
-                    overfitting_counter += 1
-                else:
-                    overfitting_counter = 0
-                if overfitting_counter >= 5:
-                    break
+            #     # terminate conditions
+            #     # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
+            #     if epoch_counter >= num_epochs and avg_augmented_cost_expert_eval < avg_augmented_cost_student_eval:
+            #         overfitting_counter += 1
+            #     else:
+            #         overfitting_counter = 0
+            #     if overfitting_counter >= 5:
+            #         break
             
     return policy
     
@@ -706,44 +706,44 @@ def train_loop_diffusion_model(policy, optimizer, lr_scheduler, noise_scheduler,
                     
             tglobal.set_postfix(loss=np.mean(epoch_loss))
 
-            if machine == 'jtorde': # if it's my desktop, then evaluate on the whole dataset
-                # each epoch, we evaluate the model on evaluation data
-                costs = evaluate_diffusion_model(dataset_eval, policy, noise_scheduler, **kwargs)
-                # unpack
-                avg_cost_expert_eval, avg_obst_avoidance_violation_expert_eval, avg_dyn_lim_violation_expert_eval, avg_augmented_cost_expert_eval, \
-                min_cost_expert_eval, min_obst_avoidance_violation_expert_eval, min_dyn_lim_violation_expert_eval, min_augmented_cost_expert_eval, \
-                avg_cost_student_eval, avg_obst_avoidance_violation_student_eval, avg_dyn_lim_violation_student_eval, avg_augmented_cost_student_eval, \
-                min_cost_student_eval, min_obst_avoidance_violation_student_eval, min_dyn_lim_violation_student_eval, min_augmented_cost_student_eval = costs
+            # if machine == 'jtorde': # if it's my desktop, then evaluate on the whole dataset
+            #     # each epoch, we evaluate the model on evaluation data
+            #     costs = evaluate_diffusion_model(dataset_eval, policy, noise_scheduler, **kwargs)
+            #     # unpack
+            #     avg_cost_expert_eval, avg_obst_avoidance_violation_expert_eval, avg_dyn_lim_violation_expert_eval, avg_augmented_cost_expert_eval, \
+            #     min_cost_expert_eval, min_obst_avoidance_violation_expert_eval, min_dyn_lim_violation_expert_eval, min_augmented_cost_expert_eval, \
+            #     avg_cost_student_eval, avg_obst_avoidance_violation_student_eval, avg_dyn_lim_violation_student_eval, avg_augmented_cost_student_eval, \
+            #     min_cost_student_eval, min_obst_avoidance_violation_student_eval, min_dyn_lim_violation_student_eval, min_augmented_cost_student_eval = costs
 
-                # each epoch we evaluate the model on training data too (to check overfitting)
-                costs = evaluate_diffusion_model(dataset_training, policy, noise_scheduler, **kwargs)
-                # unpack
-                avg_cost_expert_training, avg_obst_avoidance_violation_expert_training, avg_dyn_lim_violation_expert_training, avg_augmented_cost_expert_training, \
-                min_cost_expert_training, min_obst_avoidance_violation_expert_training, min_dyn_lim_violation_expert_training, min_augmented_cost_expert_training, \
-                avg_cost_student_training, avg_obst_avoidance_violation_student_training, avg_dyn_lim_violation_student_training, avg_augmented_cost_student_training, \
-                min_cost_student_training, min_obst_avoidance_violation_student_training, min_dyn_lim_violation_student_training, min_augmented_cost_student_training = costs
+            #     # each epoch we evaluate the model on training data too (to check overfitting)
+            #     costs = evaluate_diffusion_model(dataset_training, policy, noise_scheduler, **kwargs)
+            #     # unpack
+            #     avg_cost_expert_training, avg_obst_avoidance_violation_expert_training, avg_dyn_lim_violation_expert_training, avg_augmented_cost_expert_training, \
+            #     min_cost_expert_training, min_obst_avoidance_violation_expert_training, min_dyn_lim_violation_expert_training, min_augmented_cost_expert_training, \
+            #     avg_cost_student_training, avg_obst_avoidance_violation_student_training, avg_dyn_lim_violation_student_training, avg_augmented_cost_student_training, \
+            #     min_cost_student_training, min_obst_avoidance_violation_student_training, min_dyn_lim_violation_student_training, min_augmented_cost_student_training = costs
 
-                # wandb logging
-                wandb.log({
-                    'min_cost_expert_eval': min_cost_expert_eval,
-                    'avg_cost_expert_eval': avg_cost_expert_eval,
-                    'min_cost_student_eval': min_cost_student_eval,
-                    'avg_cost_student_eval': avg_cost_student_eval,
-                    'min_cost_expert_training': min_cost_expert_training,
-                    'avg_cost_expert_training': avg_cost_expert_training,
-                    'min_cost_student_training': min_cost_student_training,
-                    'avg_cost_student_training': avg_cost_student_training,
-                    'epoch': epoch_idx
-                })
+            #     # wandb logging
+            #     wandb.log({
+            #         'min_cost_expert_eval': min_cost_expert_eval,
+            #         'avg_cost_expert_eval': avg_cost_expert_eval,
+            #         'min_cost_student_eval': min_cost_student_eval,
+            #         'avg_cost_student_eval': avg_cost_student_eval,
+            #         'min_cost_expert_training': min_cost_expert_training,
+            #         'avg_cost_expert_training': avg_cost_expert_training,
+            #         'min_cost_student_training': min_cost_student_training,
+            #         'avg_cost_student_training': avg_cost_student_training,
+            #         'epoch': epoch_idx
+            #     })
                 
-                # terminate conditions
-                # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
-                if epoch_counter >= num_epochs and avg_augmented_cost_expert_eval < avg_augmented_cost_student_eval:
-                    overfitting_counter += 1
-                else:
-                    overfitting_counter = 0
-                if overfitting_counter >= 5:
-                    break
+            #     # terminate conditions
+            #     # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
+            #     if epoch_counter >= num_epochs and avg_augmented_cost_expert_eval < avg_augmented_cost_student_eval:
+            #         overfitting_counter += 1
+            #     else:
+            #         overfitting_counter = 0
+            #     if overfitting_counter >= 5:
+            #         break
             
     return policy
 
@@ -848,44 +848,44 @@ def train_loop_non_diffusion_model(policy, optimizer, lr_scheduler, **kwargs):
             tglobal.set_postfix(loss=np.mean(epoch_loss))
 
             # each epoch, we evaluate the model on evaluation data
-            if machine == 'jtorde': # if it's my desktop, then evaluate on the whole dataset
-                # each epoch, we evaluate the model on evaluation data
-                costs = evaluate_non_diffusion_model(dataset_eval, policy, **kwargs)
-                # unpack
-                avg_cost_expert_eval, avg_obst_avoidance_violation_expert_eval, avg_dyn_lim_violation_expert_eval, avg_augmented_cost_expert_eval, \
-                min_cost_expert_eval, min_obst_avoidance_violation_expert_eval, min_dyn_lim_violation_expert_eval, min_augmented_cost_expert_eval, \
-                avg_cost_student_eval, avg_obst_avoidance_violation_student_eval, avg_dyn_lim_violation_student_eval, avg_augmented_cost_student_eval, \
-                min_cost_student_eval, min_obst_avoidance_violation_student_eval, min_dyn_lim_violation_student_eval, min_augmented_cost_student_eval = costs
+            # if machine == 'jtorde': # if it's my desktop, then evaluate on the whole dataset
+            #     # each epoch, we evaluate the model on evaluation data
+            #     costs = evaluate_non_diffusion_model(dataset_eval, policy, **kwargs)
+            #     # unpack
+            #     avg_cost_expert_eval, avg_obst_avoidance_violation_expert_eval, avg_dyn_lim_violation_expert_eval, avg_augmented_cost_expert_eval, \
+            #     min_cost_expert_eval, min_obst_avoidance_violation_expert_eval, min_dyn_lim_violation_expert_eval, min_augmented_cost_expert_eval, \
+            #     avg_cost_student_eval, avg_obst_avoidance_violation_student_eval, avg_dyn_lim_violation_student_eval, avg_augmented_cost_student_eval, \
+            #     min_cost_student_eval, min_obst_avoidance_violation_student_eval, min_dyn_lim_violation_student_eval, min_augmented_cost_student_eval = costs
 
-                # each epoch we evaluate the model on training data too (to check overfitting)
-                costs = evaluate_non_diffusion_model(dataset_training, policy, **kwargs)
-                # unpack
-                avg_cost_expert_training, avg_obst_avoidance_violation_expert_training, avg_dyn_lim_violation_expert_training, avg_augmented_cost_expert_training, \
-                min_cost_expert_training, min_obst_avoidance_violation_expert_training, min_dyn_lim_violation_expert_training, min_augmented_cost_expert_training, \
-                avg_cost_student_training, avg_obst_avoidance_violation_student_training, avg_dyn_lim_violation_student_training, avg_augmented_cost_student_training, \
-                min_cost_student_training, min_obst_avoidance_violation_student_training, min_dyn_lim_violation_student_training, min_augmented_cost_student_training = costs
+            #     # each epoch we evaluate the model on training data too (to check overfitting)
+            #     costs = evaluate_non_diffusion_model(dataset_training, policy, **kwargs)
+            #     # unpack
+            #     avg_cost_expert_training, avg_obst_avoidance_violation_expert_training, avg_dyn_lim_violation_expert_training, avg_augmented_cost_expert_training, \
+            #     min_cost_expert_training, min_obst_avoidance_violation_expert_training, min_dyn_lim_violation_expert_training, min_augmented_cost_expert_training, \
+            #     avg_cost_student_training, avg_obst_avoidance_violation_student_training, avg_dyn_lim_violation_student_training, avg_augmented_cost_student_training, \
+            #     min_cost_student_training, min_obst_avoidance_violation_student_training, min_dyn_lim_violation_student_training, min_augmented_cost_student_training = costs
 
-                # wandb logging
-                wandb.log({
-                    'min_cost_expert_eval': min_cost_expert_eval,
-                    'avg_cost_expert_eval': avg_cost_expert_eval,
-                    'min_cost_student_eval': min_cost_student_eval,
-                    'avg_cost_student_eval': avg_cost_student_eval,
-                    'min_cost_expert_training': min_cost_expert_training,
-                    'avg_cost_expert_training': avg_cost_expert_training,
-                    'min_cost_student_training': min_cost_student_training,
-                    'avg_cost_student_training': avg_cost_student_training,
-                    'epoch': epoch_idx
-                })
+            #     # wandb logging
+            #     wandb.log({
+            #         'min_cost_expert_eval': min_cost_expert_eval,
+            #         'avg_cost_expert_eval': avg_cost_expert_eval,
+            #         'min_cost_student_eval': min_cost_student_eval,
+            #         'avg_cost_student_eval': avg_cost_student_eval,
+            #         'min_cost_expert_training': min_cost_expert_training,
+            #         'avg_cost_expert_training': avg_cost_expert_training,
+            #         'min_cost_student_training': min_cost_student_training,
+            #         'avg_cost_student_training': avg_cost_student_training,
+            #         'epoch': epoch_idx
+            #     })
                 
-                # terminate conditions
-                # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
-                if epoch_counter >= num_epochs and avg_augmented_cost_expert_eval < avg_augmented_cost_student_eval:
-                    overfitting_counter += 1
-                else:
-                    overfitting_counter = 0
-                if overfitting_counter >= 5:
-                    break
+            #     # terminate conditions
+            #     # if epoch_counter is more than 1/5 of the total epoch and augmented cost of expert is less than augmented cost of student 5 times in a row, then stop training
+            #     if epoch_counter >= num_epochs and avg_augmented_cost_expert_eval < avg_augmented_cost_student_eval:
+            #         overfitting_counter += 1
+            #     else:
+            #         overfitting_counter = 0
+            #     if overfitting_counter >= 5:
+            #         break
             
     return policy
 
