@@ -217,6 +217,7 @@ class ConditionalUnet1D(nn.Module):
 
         # linear layers after obst encoder
         layers = []
+        linear_layer_input_dim += output_dim_for_agent_obs
         for next_dim in mlp_hidden_sizes:
             layers.append(nn.Linear(linear_layer_input_dim, next_dim))
             layers.append(mlp_activation)
@@ -239,7 +240,7 @@ class ConditionalUnet1D(nn.Module):
         # 1D UNet
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
-        cond_dim = dsed + linear_layer_output_dim + output_dim_for_agent_obs
+        cond_dim = dsed + linear_layer_output_dim
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
         down_modules = nn.ModuleList([])
@@ -319,28 +320,21 @@ class ConditionalUnet1D(nn.Module):
 
         # obst_obs goes to a separate encoder
         if self.en_network_type == "mlp":
-            
-            obst_obs = self.layers(obst_obs)
-
+            pass
         elif self.en_network_type == "lstm":
             
             # reshape input to (num_obst, input_dim=33)
             obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
-            output, (h_n, c_n) = self.lstm(obst_obs) # get the output
-            if len(output.shape) == 3:
-                output = output[:, [-1], :]
-            else:
-                output = output[[-1], :]
-            obst_obs = self.layers(output) # pass it through the layers
+            obst_obs, (h_n, c_n) = self.lstm(obst_obs) # get the obst_obs
+            obst_obs = obst_obs[:, [-1], :]
         
         elif self.en_network_type == "transformer":
 
             # reshape input to (batch_size, num_obst, input_dim=43)
             obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
 
-            output = self.transformer(src=obst_obs, tgt=obst_obs)
-            output = output[:, [-1], :] # get the last output (because we want the output dim fixed)
-            obst_obs = self.layers(output) # pass it through the layers
+            obst_obs = self.transformer(src=obst_obs, tgt=obst_obs)
+            obst_obs = obst_obs[:, [-1], :] # get the last obst_obs (because we want the obst_obs dim fixed)
 
         # Use GNN for encoder
         if self.en_network_type == "gnn" and x_dict is not None and edge_index_dict is not None:
@@ -348,12 +342,12 @@ class ConditionalUnet1D(nn.Module):
                 x_dict[node_type] = self.lin_dict[node_type](x_gnn).relu_()
             for conv in self.convs:
                 x_dict = conv(x_dict, edge_index_dict)
-            output = x_dict["current_state"] # extract the latent vector
-            obst_obs = self.layers(output)
+            obst_obs = x_dict["current_state"] # extract the latent vector
+            obst_obs = obst_obs.unsqueeze(1)
 
         # agent_obs and obst_obs are concatenated
         encoder_output = torch.cat((agent_obs, obst_obs), dim=-1)
-        encoder_output = encoder_output.squeeze(1)
+        encoder_output = self.layers(encoder_output).squeeze(1)
 
         # tanh activation
         encoder_output = self.tanh(encoder_output)

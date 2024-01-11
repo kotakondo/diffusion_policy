@@ -158,11 +158,7 @@ def evaluate_diffusion_model(dataset, policy, noise_scheduler, return_only_stude
 
         # evaluation for expert actions
         for nob, expert_action in zip(nobs, expert_actions):
-
             cost_expert, obst_avoidance_violation_expert, dyn_lim_violation_expert, augmented_cost_expert = [], [], [], []
-            if use_gnn:
-                nob = nob[0, :, :]
-
             for j in range(expert_action.shape[0]): # for num_trajs we loop through
 
                 # compute cost
@@ -191,8 +187,6 @@ def evaluate_diffusion_model(dataset, policy, noise_scheduler, return_only_stude
     # evaluation for student actions
     for nob, student_action in zip(nobs, student_actions):
         cost_student, obst_avoidance_violation_student, dyn_lim_violation_student, augmented_cost_student = [], [], [], []
-        if use_gnn:
-            nob = nob[0, :, :]
         for j in range(student_action.shape[0]): # for num_trajs we loop through
             
             # compute cost
