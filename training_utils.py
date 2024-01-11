@@ -66,9 +66,11 @@ def evaluate_non_diffusion_model(dataset, policy, **kwargs):
             nob = nob.squeeze(0) # remove the first dimension
             expert_action = expert_action.squeeze(0) # remove the first dimension
         else:
+            nob = nob.unsqueeze(1)
             start_time = time.time()
             student_action = policy(nob)
             end_time = time.time()
+            nob = nob.squeeze(1)
 
         computation_times.append(end_time - start_time)
 
@@ -80,7 +82,6 @@ def evaluate_non_diffusion_model(dataset, policy, **kwargs):
         nob = nob.detach().cpu().numpy()
         expert_action = expert_action.detach().cpu().numpy()
         student_action = student_action.detach().cpu().numpy()
-        print("student_action.shape", student_action.shape)
 
         # compute cost for expert
         cost_expert, obst_avoidance_violation_expert, dyn_lim_violation_expert, augmented_cost_expert = [], [], [], []
@@ -161,11 +162,11 @@ def evaluate_diffusion_model(dataset, policy, noise_scheduler, return_only_stude
             cost_expert, obst_avoidance_violation_expert, dyn_lim_violation_expert, augmented_cost_expert = [], [], [], []
             if use_gnn:
                 nob = nob[0, :, :]
-            expert_action = expert_action.squeeze(0) # remove the first dimension
+
             for j in range(expert_action.shape[0]): # for num_trajs we loop through
 
                 # compute cost
-                cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob, expert_action[[j], :])
+                cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob[0, [0], :], expert_action[0, [j], :])
                 
                 # append
                 cost_expert.append(cost)
@@ -195,7 +196,7 @@ def evaluate_diffusion_model(dataset, policy, noise_scheduler, return_only_stude
         for j in range(student_action.shape[0]): # for num_trajs we loop through
             
             # compute cost
-            cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob, student_action[[j], :])
+            cost, obst_avoidance_violation, dyn_lim_violation, augmented_cost = cost_computer.computeCost_AndObsAvoidViolation_AndDynLimViolation_AndAugmentedCost(nob[0, [0], :], student_action[0, [j], :])
             
             # append
             cost_student.append(cost)

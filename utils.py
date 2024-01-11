@@ -474,14 +474,14 @@ def get_nactions(policy, noise_scheduler, dataset, is_visualize=False, **kwargs)
     for dataset_idx in tqdm(range(num_data_to_load), desc="dataset idx in denoising", leave=False):
 
         # stack the last obs_horizon (2) number of observations
-        nobs = dataset[dataset_idx].obs if use_gnn else dataset[dataset_idx]['obs'] # (B, global_cond_dim)
+        nobs = dataset[dataset_idx].obs if use_gnn else dataset[dataset_idx]['obs'].unsqueeze(0) # (B, global_cond_dim)
         expert_action = dataset[dataset_idx].acts if use_gnn else dataset[dataset_idx]['acts'].unsqueeze(0) # (B, num_trajs, action_dim)
 
         # infer action
         with torch.no_grad():
 
             # reshape observation to (B,obs_horizon*obs_dim)
-            obs_cond = nobs.unsqueeze(0).flatten(start_dim=1)
+            obs_cond = nobs.flatten(start_dim=2)
             # initialize action from Guassian noise
             noisy_action = torch.randn(
                 (B, num_trajs, action_dim), device=device)
@@ -507,6 +507,7 @@ def get_nactions(policy, noise_scheduler, dataset, is_visualize=False, **kwargs)
                         edge_index_dict=edge_index_dict
                     )
                 else:
+
                     noise_pred = policy(
                         sample=naction,
                         timestep=k,
@@ -526,14 +527,14 @@ def get_nactions(policy, noise_scheduler, dataset, is_visualize=False, **kwargs)
 
         # append to the list
         expert_actions.append(expert_action.cpu().numpy())
-        nactions.append(naction.squeeze(0).cpu().numpy())
+        nactions.append(naction.cpu().numpy())
         nobses.append(nobs.cpu().numpy())
 
         if is_visualize:
             # print out the computation time
             print("computation time: ", np.mean(times))
             # visualize trajectory
-            visualize_trajectory(expert_action.cpu().numpy(), naction.squeeze(0).cpu().numpy(), nobs, dataset_idx)
+            visualize_trajectory(expert_action.cpu().numpy(), naction.cpu().numpy(), nobs, dataset_idx)
 
     if not is_visualize: # used get_nactions used in evaluation
         return expert_actions, nactions, nobses, np.mean(times)

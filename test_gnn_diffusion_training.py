@@ -76,7 +76,7 @@ def main():
     obst_obs_dim = 33
     output_dim_for_agent_obs = 64                                       # output dim for agent obs
     action_dim = 22                                                     # 15(pos) + 6(yaw) + 1(time)
-    num_diffusion_iters = 10                                            # number of diffusion iterations
+    num_diffusion_iters = 20                                            # number of diffusion iterations
     num_epochs = 1000 if not is_test_run else 5                          # number of epochs
     num_eval = 10                                                       # number of evaluation data points
     batch_size = 256 if not is_test_run else 4                          # batch size

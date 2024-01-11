@@ -185,7 +185,6 @@ class ConditionalUnet1D(nn.Module):
             layers.append(mlp_activation)
             input_dim_for_agent_obs = next_dim
         layers.append(nn.Linear(input_dim_for_agent_obs, output_dim_for_agent_obs))
-        layers.append(nn.Tanh())
         self.agent_obs_layers = nn.Sequential(*layers)
 
         # Use MLP for encoder
@@ -223,8 +222,10 @@ class ConditionalUnet1D(nn.Module):
             layers.append(mlp_activation)
             linear_layer_input_dim = next_dim
         layers.append(nn.Linear(linear_layer_input_dim, linear_layer_output_dim))
-        layers.append(nn.Tanh())
         self.layers = nn.Sequential(*layers)
+
+        # tanh activation
+        self.tanh = nn.Tanh()
 
         #  diffusion step encoder
         dsed = diffusion_step_embed_dim
@@ -296,7 +297,7 @@ class ConditionalUnet1D(nn.Module):
         output: (B,T,input_dim)
         """
         # (B,T,C)
-        sample = sample.moveaxis(-1,-2)
+        sample = sample.moveaxis(-1, -2)
         # (B,C,T)
 
         # 1. time
@@ -309,7 +310,6 @@ class ConditionalUnet1D(nn.Module):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         
         # Encoder layers
-        
         # first separate the agent observation and the obstacle observation
         agent_obs = global_cond[:, [0], :10] # agent's observation won't change across obstacles in the same scene
         obst_obs = global_cond[:, :, 10:]
@@ -328,10 +328,9 @@ class ConditionalUnet1D(nn.Module):
             obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
             output, (h_n, c_n) = self.lstm(obst_obs) # get the output
             if len(output.shape) == 3:
-                output = output[:, -1, :]
+                output = output[:, [-1], :]
             else:
                 output = output[[-1], :]
-            # output = output[:, -1, :] # get the last output
             obst_obs = self.layers(output) # pass it through the layers
         
         elif self.en_network_type == "transformer":
@@ -355,6 +354,9 @@ class ConditionalUnet1D(nn.Module):
         # agent_obs and obst_obs are concatenated
         encoder_output = torch.cat((agent_obs, obst_obs), dim=-1)
         encoder_output = encoder_output.squeeze(1)
+
+        # tanh activation
+        encoder_output = self.tanh(encoder_output)
 
         # global conditioning
         timesteps = timesteps.expand(sample.shape[0])
@@ -440,7 +442,6 @@ class MLP(nn.Module):
             layers.append(mlp_activation)
             input_dim_for_agent_obs = next_dim
         layers.append(nn.Linear(input_dim_for_agent_obs, output_dim_for_agent_obs))
-        layers.append(nn.Tanh())
         self.agent_obs_layers = nn.Sequential(*layers)
 
         # Use MLP for encoder
@@ -478,8 +479,10 @@ class MLP(nn.Module):
             layers.append(mlp_activation)
             linear_layer_input_dim = next_dim
         layers.append(nn.Linear(linear_layer_input_dim, self.num_trajs*self.action_dim - output_dim_for_agent_obs))
-        layers.append(nn.Tanh())
         self.layers = nn.Sequential(*layers)
+
+        # tanh activation
+        self.tanh = nn.Tanh()
 
     def forward(self, x: th.Tensor, x_dict=None, edge_index_dict=None) -> th.Tensor:
 
@@ -526,6 +529,9 @@ class MLP(nn.Module):
 
         # agent_obs and obst_obs are concatenated
         output = torch.cat((agent_obs, obst_obs), dim=-1)
+
+        # tanh activation
+        output = self.tanh(output)
 
         # (B, num_traj, action_dim)
         output = output.reshape(output.shape[0], self.num_trajs, self.action_dim)
