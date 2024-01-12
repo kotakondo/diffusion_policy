@@ -142,10 +142,9 @@ class ConditionalUnet1D(nn.Module):
         
         # unpack kwargs
         input_dim = kwargs["action_dim"]
+        obs_dim = kwargs["obs_dim"]
         diffusion_step_embed_dim = kwargs["diffusion_step_embed_dim"]
         down_dims = kwargs["diffusion_down_dims"]
-        agent_obs_dim = kwargs["agent_obs_dim"]
-        obst_obs_dim = kwargs["obst_obs_dim"]
         kernel_size = kwargs["diffusion_kernel_size"]
         use_gnn = kwargs["en_network_type"] == "gnn"
         lstm_hidden_size = kwargs["lstm_hidden_size"]
@@ -174,34 +173,33 @@ class ConditionalUnet1D(nn.Module):
         self.agent_obs_hidden_sizes = agent_obs_hidden_sizes
         self.mlp_hidden_sizes = mlp_hidden_sizes
         self.mlp_activation = mlp_activation
-        self.agent_obs_dim = agent_obs_dim
-        self.obst_obs_dim = obst_obs_dim
+        self.obs_dim = obs_dim
 
         # Use MLP for agent observation encoder
-        layers = []
-        input_dim_for_agent_obs = self.agent_obs_dim
-        for next_dim in agent_obs_hidden_sizes:
-            layers.append(nn.Linear(input_dim_for_agent_obs, next_dim))
-            layers.append(mlp_activation)
-            input_dim_for_agent_obs = next_dim
-        layers.append(nn.Linear(input_dim_for_agent_obs, output_dim_for_agent_obs))
-        self.agent_obs_layers = nn.Sequential(*layers)
+        # layers = []
+        # input_dim_for_agent_obs = self.agent_obs_dim
+        # for next_dim in agent_obs_hidden_sizes:
+        #     layers.append(nn.Linear(input_dim_for_agent_obs, next_dim))
+        #     layers.append(mlp_activation)
+        #     input_dim_for_agent_obs = next_dim
+        # layers.append(nn.Linear(input_dim_for_agent_obs, output_dim_for_agent_obs))
+        # self.agent_obs_layers = nn.Sequential(*layers)
 
         # Use MLP for encoder
         if self.en_network_type == "mlp":
-            linear_layer_input_dim = obst_obs_dim
+            linear_layer_input_dim = obs_dim
 
         # Use LSTM for encoder
         if self.en_network_type == "lstm":
-            self.lstm = nn.LSTM(obst_obs_dim, lstm_hidden_size, batch_first=True)
+            self.lstm = nn.LSTM(obs_dim, lstm_hidden_size, batch_first=True)
             linear_layer_input_dim = lstm_hidden_size
 
         # Use Transformer for encoder
         if self.en_network_type == "transformer":
             # TransformerEncoderLayer won't be able to output the fixed tensor size when input's num of obst is not fixed
-            # self.transformer = nn.TransformerEncoderLayer(d_model=obst_obs_dim, nhead=transformer_nhead, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
-            self.transformer = nn.Transformer(d_model=obst_obs_dim, nhead=transformer_nhead, num_encoder_layers=4, num_decoder_layers=4, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
-            linear_layer_input_dim = obst_obs_dim
+            # self.transformer = nn.TransformerEncoderLayer(d_model=obs_dim, nhead=transformer_nhead, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
+            self.transformer = nn.Transformer(d_model=obs_dim, nhead=transformer_nhead, num_encoder_layers=4, num_decoder_layers=4, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
+            linear_layer_input_dim = obs_dim
 
         # Use GNN for encoder
         if self.en_network_type == "gnn":
@@ -217,7 +215,6 @@ class ConditionalUnet1D(nn.Module):
 
         # linear layers after obst encoder
         layers = []
-        linear_layer_input_dim += output_dim_for_agent_obs
         for next_dim in mlp_hidden_sizes:
             layers.append(nn.Linear(linear_layer_input_dim, next_dim))
             layers.append(mlp_activation)
@@ -312,11 +309,11 @@ class ConditionalUnet1D(nn.Module):
         
         # Encoder layers
         # first separate the agent observation and the obstacle observation
-        agent_obs = global_cond[:, [0], :10] # agent's observation won't change across obstacles in the same scene
-        obst_obs = global_cond[:, :, 10:]
+        # agent_obs = global_cond[:, [0], :10] # agent's observation won't change across obstacles in the same scene
+        obst_obs = global_cond[:, :, :]
 
         # agent_obs goes to a separate linear layer
-        agent_obs = self.agent_obs_layers(agent_obs)
+        # agent_obs = self.agent_obs_layers(agent_obs)
 
         # obst_obs goes to a separate encoder
         if self.en_network_type == "mlp":
@@ -324,14 +321,14 @@ class ConditionalUnet1D(nn.Module):
         elif self.en_network_type == "lstm":
             
             # reshape input to (num_obst, input_dim=33)
-            obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
+            obst_obs = reshape_input_for_rnn(obst_obs, self.obs_dim)
             obst_obs, (h_n, c_n) = self.lstm(obst_obs) # get the obst_obs
             obst_obs = obst_obs[:, [-1], :]
         
         elif self.en_network_type == "transformer":
 
             # reshape input to (batch_size, num_obst, input_dim=43)
-            obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
+            obst_obs = reshape_input_for_rnn(obst_obs, self.obs_dim)
 
             obst_obs = self.transformer(src=obst_obs, tgt=obst_obs)
             obst_obs = obst_obs[:, [-1], :] # get the last obst_obs (because we want the obst_obs dim fixed)
@@ -346,8 +343,8 @@ class ConditionalUnet1D(nn.Module):
             obst_obs = obst_obs.unsqueeze(1)
 
         # agent_obs and obst_obs are concatenated
-        encoder_output = torch.cat((agent_obs, obst_obs), dim=-1)
-        encoder_output = self.layers(encoder_output).squeeze(1)
+        # encoder_output = torch.cat((agent_obs, obst_obs), dim=-1)
+        encoder_output = self.layers(obst_obs).squeeze(1)
 
         # tanh activation
         encoder_output = self.tanh(encoder_output)

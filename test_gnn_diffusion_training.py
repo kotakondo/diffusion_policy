@@ -77,7 +77,7 @@ def main():
     output_dim_for_agent_obs = 64                                       # output dim for agent obs
     action_dim = 22                                                     # 15(pos) + 6(yaw) + 1(time)
     num_diffusion_iters = 10                                            # number of diffusion iterations
-    num_epochs = 1000 if not is_test_run else 5                         # number of epochs
+    num_epochs = 1000 if not is_test_run else 1                         # number of epochs
     num_eval = 10                                                       # number of evaluation data points
     batch_size = 256 if not is_test_run else 4                          # batch size
     scheduler_type = 'ddim' # 'ddpm', 'ddim' or 'dpm-multistep'         # scheduler type (ddpm/dpm-multistep)
@@ -118,7 +118,7 @@ def main():
     transformer_nhead = 43 if de_network_type == 'mlp' else 23          # nhead for transformer (43 for mlp, 1, 13, 23, 299 for diffusion)
     transformer_dim_feedforward = 1024                                  # feedforward_dim for transformer
     transformer_dropout = 0.1                                           # dropout for transformer
-    transformer_nhead = 3 # 1, 3, 11, 33                                # nhead for transformer
+    transformer_nhead = 1                                               # nhead for transformer
     gnn_hidden_channels = 1024                                          # hidden_channels for gnn
     gnn_num_layers = 4                                                  # num_layers for gnn
     gnn_num_heads = 4                                                   # num_heads for gnn
