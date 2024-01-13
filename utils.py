@@ -21,7 +21,6 @@ from torch_geometric.loader import DataLoader as GNNDataLoader
 # visualization import
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-# from compression.utils.other import ObservationManager, ActionManager, getZeroState
 
 # calculate loss
 from scipy.optimize import linear_sum_assignment
@@ -634,14 +633,16 @@ def plot_yaw(actions, am, ax, label, num_vectors_yaw, start_state):
 
         if not action_idx == 0:
             label = None
-        else:
-            ax.plot(time_yaw, w_yawBS.pos_bs[0](time_yaw), lw=4, alpha=0.7, label='Diffusion', c=color)
+        
+        ax.plot(time_yaw, w_yawBS.pos_bs[0](time_yaw), lw=4, alpha=0.7, label=label, c=color)
 
         action_idx += 1
         if action_idx > len(actions):
             break
 
 def visualize_trajectory(expert_action, action_pred, nobs, image_idx):
+
+    from compression.utils.other import ObservationManager, ActionManager, getZeroState
 
     # interpolation parameters
     num_vectors_pos = 100
@@ -657,6 +658,10 @@ def visualize_trajectory(expert_action, action_pred, nobs, image_idx):
     # plot 
     fig = plt.figure(figsize=(20, 20))
     ax = fig.add_subplot(211, projection='3d')
+
+    expert_action = expert_action.squeeze(0)
+    action_pred = action_pred.squeeze(0)
+    nobs = nobs.squeeze(0)
 
     # plot pos trajectories
     plot_pos(expert_action, am, ax, 'Expert', num_vectors_pos, num_vectors_yaw, start_state)
@@ -694,26 +699,17 @@ def visualize_trajectory(expert_action, action_pred, nobs, image_idx):
     # fig.savefig(f'/media/jtorde/T7/gdp/pngs/image_{image_idx}.png')
     plt.show()
 
-def visualize(save_dir, use_gnn, device, num_eval, pred_horizon, num_diffusion_iters, action_dim, noise_pred_net, noise_scheduler, dataset):
+def visualize(policy, noise_scheduler, **kwargs):
 
-    """ ********************* VISUALIZATION ********************* """
+    """
+    This function visualizes the predicted trajectory
+    """
 
-    # load model
-    dir = str(save_dir)
-    # get the latest model in the directory
-    files = os.listdir(dir)
-    files = [dir + '/' + file for file in files if file.endswith('.pth')]
-    files.sort(key=os.path.getmtime)
-    model_path = files[-1]
-    print("model_path: ", model_path)
-    model = th.load(model_path, map_location=device)
-    noise_pred_net.load_state_dict(model)
-
-    # choose random num_eval dataset
-    dataset = th.utils.data.Subset(dataset, th.randperm(len(dataset))[:num_eval])
+    # unpack
+    dataset = kwargs.get('datasets_loader')['dataset_test']
 
     # get expert actions and predicted actions(nactions)
-    get_nactions(noise_pred_net, noise_scheduler, dataset, pred_horizon, num_diffusion_iters, action_dim, use_gnn, device, is_visualize=True, num_eval=10)
+    get_nactions(policy, noise_scheduler, dataset, is_visualize=True, **kwargs)
 
 def calculate_deep_panther_loss(batch, policy, **kwargs):
     """Calculate the supervised learning loss used to train the behavioral clone.

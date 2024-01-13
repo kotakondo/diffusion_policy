@@ -394,8 +394,7 @@ class MLP(nn.Module):
         # unpack kwargs
         self.action_dim = kwargs["action_dim"]
         self.num_trajs = kwargs["num_trajs"]
-        agent_obs_dim = kwargs["agent_obs_dim"]
-        obst_obs_dim = kwargs["obst_obs_dim"]
+        obs_dim = kwargs["obs_dim"]
         use_gnn = kwargs["en_network_type"] == "gnn"
         lstm_hidden_size = kwargs["lstm_hidden_size"]
         transformer_dim_feedforward = kwargs["transformer_dim_feedforward"]
@@ -422,34 +421,23 @@ class MLP(nn.Module):
         self.agent_obs_hidden_sizes = agent_obs_hidden_sizes
         self.mlp_hidden_sizes = mlp_hidden_sizes
         self.mlp_activation = mlp_activation
-        self.agent_obs_dim = agent_obs_dim
-        self.obst_obs_dim = obst_obs_dim
-
-        # Use MLP for agent observation encoder
-        layers = []
-        input_dim_for_agent_obs = self.agent_obs_dim
-        for next_dim in agent_obs_hidden_sizes:
-            layers.append(nn.Linear(input_dim_for_agent_obs, next_dim))
-            layers.append(mlp_activation)
-            input_dim_for_agent_obs = next_dim
-        layers.append(nn.Linear(input_dim_for_agent_obs, output_dim_for_agent_obs))
-        self.agent_obs_layers = nn.Sequential(*layers)
+        self.obs_dim = obs_dim
 
         # Use MLP for encoder
         if self.en_network_type == "mlp":
-            linear_layer_input_dim = obst_obs_dim
+            linear_layer_input_dim = obs_dim
 
         # Use LSTM for encoder
         if self.en_network_type == "lstm":
-            self.lstm = nn.LSTM(obst_obs_dim, lstm_hidden_size, batch_first=True)
+            self.lstm = nn.LSTM(obs_dim, lstm_hidden_size, batch_first=True)
             linear_layer_input_dim = lstm_hidden_size
 
         # Use Transformer for encoder
         if self.en_network_type == "transformer":
             # TransformerEncoderLayer won't be able to output the fixed tensor size when input's num of obst is not fixed
-            # self.transformer = nn.TransformerEncoderLayer(d_model=obst_obs_dim, nhead=transformer_nhead, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
-            self.transformer = nn.Transformer(d_model=obst_obs_dim, nhead=transformer_nhead, num_encoder_layers=4, num_decoder_layers=4, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
-            linear_layer_input_dim = obst_obs_dim
+            # self.transformer = nn.TransformerEncoderLayer(d_model=obs_dim, nhead=transformer_nhead, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
+            self.transformer = nn.Transformer(d_model=obs_dim, nhead=transformer_nhead, num_encoder_layers=4, num_decoder_layers=4, dim_feedforward=transformer_dim_feedforward, dropout=transformer_dropout, batch_first=True)
+            linear_layer_input_dim = obs_dim
 
         # Use GNN for encoder
         if self.en_network_type == "gnn":
@@ -469,7 +457,7 @@ class MLP(nn.Module):
             layers.append(nn.Linear(linear_layer_input_dim, next_dim))
             layers.append(mlp_activation)
             linear_layer_input_dim = next_dim
-        layers.append(nn.Linear(linear_layer_input_dim, self.num_trajs*self.action_dim - output_dim_for_agent_obs))
+        layers.append(nn.Linear(linear_layer_input_dim, self.num_trajs*self.action_dim))
         self.layers = nn.Sequential(*layers)
 
         # tanh activation
@@ -479,34 +467,26 @@ class MLP(nn.Module):
 
         # Encoder layers
         
-        # first separate the agent observation and the obstacle observation
-        agent_obs = x[:, [0], :self.agent_obs_dim] # agent's observation won't change across obstacles in the same scene
-        obst_obs = x[:, :, self.agent_obs_dim:]
-
-        # agent_obs goes to a separate linear layer
-        agent_obs = self.agent_obs_layers(agent_obs)
-
-        # obst_obs goes to a separate encoder
         if self.en_network_type == "mlp":
             
-            obst_obs = self.layers(obst_obs)
+            output = self.layers(x)
 
         elif self.en_network_type == "lstm":
             
             # reshape input to (num_obst, input_dim=33)
-            obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
-            output, (h_n, c_n) = self.lstm(obst_obs) # get the output
+            output = reshape_input_for_rnn(x, self.obs_dim)
+            output, (h_n, c_n) = self.lstm(output) # get the output
             output = output[:, [-1], :]
-            obst_obs = self.layers(output) # pass it through the layers
+            output = self.layers(output) # pass it through the layers
         
         elif self.en_network_type == "transformer":
 
             # reshape input to (batch_size, num_obst, input_dim=43)
-            obst_obs = reshape_input_for_rnn(obst_obs, self.obst_obs_dim)
+            output = reshape_input_for_rnn(x, self.obs_dim)
 
-            output = self.transformer(src=obst_obs, tgt=obst_obs)
+            output = self.transformer(src=output, tgt=output)
             output = output[:, [-1], :] # get the last output (because we want the output dim fixed)
-            obst_obs = self.layers(output) # pass it through the layers
+            output = self.layers(output) # pass it through the layers
 
         # Use GNN for encoder
         if self.en_network_type == "gnn" and x_dict is not None and edge_index_dict is not None:
@@ -515,11 +495,8 @@ class MLP(nn.Module):
             for conv in self.convs:
                 x_dict = conv(x_dict, edge_index_dict)
             output = x_dict["current_state"] # extract the latent vector
-            obst_obs = self.layers(output)
-            obst_obs = obst_obs.unsqueeze(1)
-
-        # agent_obs and obst_obs are concatenated
-        output = torch.cat((agent_obs, obst_obs), dim=-1)
+            output = self.layers(output)
+            output = output.unsqueeze(1)
 
         # tanh activation
         output = self.tanh(output)

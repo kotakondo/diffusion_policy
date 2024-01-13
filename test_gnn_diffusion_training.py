@@ -28,7 +28,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--machine', default='jtorde', help='machine', type=str)
-    parser.add_argument('-d', '--data-dir', default='/media/jtorde/T7/gdp/evals-dir/evals5/tmp_dagger/2/demos/', help='directory', type=str)
+    parser.add_argument('-d', '--data-dir', default='/media/jtorde/T7/gdp/evals-dir/evals6/tmp_dagger/2/demos/', help='directory', type=str)
     parser.add_argument('-s', '--save-dir', default='/media/jtorde/T7/gdp/models/', help='save directory', type=str)
     parser.add_argument('-t', '--test', default=False, help='test (small dataset)', type=str2bool)
     parser.add_argument('-en', '--en-network-type', default='mlp', help='encoder network type (/mlp/lstm/transformer/gnn)', type=str)
@@ -79,7 +79,7 @@ def main():
     num_diffusion_iters = 10                                            # number of diffusion iterations
     num_epochs = 1000 if not is_test_run else 1                         # number of epochs
     num_eval = 10                                                       # number of evaluation data points
-    batch_size = 256 if not is_test_run else 4                          # batch size
+    batch_size = 64 if not is_test_run else 4                          # batch size
     scheduler_type = 'ddim' # 'ddpm', 'ddim' or 'dpm-multistep'         # scheduler type (ddpm/dpm-multistep)
     yaw_loss_weight = 1.0                                               # yaw loss weight
     policy_save_freq = 50                                               # policy save frequency
@@ -92,7 +92,6 @@ def main():
     # sanity check
     assert not (use_reinforce_for_rl and use_importance_sampling_for_rl), "use_reinforce_for_rl and use_importance_sampling_for_rl cannot be both True"
 
-
     # check if we use GNN and last observation type
     if en_network_type == 'gnn' and obs_type != 'last':
         raise NotImplementedError("GNN only supports last observation type")
@@ -101,16 +100,6 @@ def main():
     # network parameters
 
     mlp_hidden_sizes = [2048, 2048, 2048, 2048]                         # hidden sizes for mlp
-    # mlp_hidden_sizes = [1024, 1024]                                   # hidden sizes for mlp
-
-    # if de_network_type == 'mlp':
-    #     if en_network_type == 'lstm':
-    #         mlp_hidden_sizes = [1024, 1024]
-    #     else:
-    #         mlp_hidden_sizes = [2048, 2048, 2048, 2048]
-    # elif de_network_type == 'diffusion':
-    #     mlp_hidden_sizes = [1024, 1024]
-
     agent_obs_hidden_sizes = [256, 256, 256, 256]                       # hidden sizes for agent obs
     mlp_activation = nn.ReLU()                                          # activation for mlp
     lstm_hidden_size = 1024                                             # hidden size for lstm
@@ -258,7 +247,7 @@ def main():
 
     if is_visualize:
         # TODO only supports diffusion model
-        visualize(save_dir, use_gnn, device, num_eval, num_trajs, num_diffusion_iters, action_dim, policy, noise_scheduler, dataset_test)
+        visualize(policy, noise_scheduler, **kwargs)
 
     """ ********************* TEST ********************* """
 
